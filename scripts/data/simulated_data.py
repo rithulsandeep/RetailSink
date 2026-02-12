@@ -19,7 +19,7 @@ fake = Faker("en_IN")
 # ----------------------------
 # CONFIG
 # ----------------------------
-OUTPUT_FILE = "live_sales_data.csv"
+OUTPUT_FILE = "landing/live_sales_data.csv"
 
 CATEGORIES = ["Electronics", "Fashion", "Groceries", "Home", "Beauty"]
 CHANNELS = ["Store", "Online"]
@@ -128,6 +128,9 @@ print(f"Starting enhanced live stream for Store {STORE_ID}...")
 while True:
     order = generate_order()
     df = pd.DataFrame([order])
+
+    # Ensure landing directory exists
+    os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
 
     try:
         df.to_csv(OUTPUT_FILE, mode="a", header=False, index=False)

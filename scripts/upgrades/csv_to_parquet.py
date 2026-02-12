@@ -58,7 +58,7 @@ def process_file(file_path, output_root, timestamp_col, headers=None):
 
 if __name__ == "__main__":
     # Root directory for bronze layer
-    BRONZE_ROOT = 'bronze'
+    BRONZE_ROOT = 'medallion/bronze'
     
     # 1. Process live_sales_data.csv
     # Based on simulated_data.py, headers are:
@@ -68,13 +68,13 @@ if __name__ == "__main__":
         "discount", "payment_method", "holiday_flag", "order_status", 
         "total_amount", "timestamp"
     ]
-    process_file('live_sales_data.csv', BRONZE_ROOT, 'timestamp', headers=sales_headers)
+    process_file('landing/live_sales_data.csv', BRONZE_ROOT, 'timestamp', headers=sales_headers)
     
     # 2. Process online_retail_II.xlsx
     # We force sensitive columns to string to avoid pyarrow conversion errors
     try:
         print("--- Special Handling for online_retail_II.xlsx ---")
-        df_excel = pd.read_excel('online_retail_II.xlsx')
+        df_excel = pd.read_excel('landing/online_retail_II.xlsx')
         
         # Force all object-type columns to string to prevent pyarrow conversion issues
         # (Mixed types like int/str in a 'Description' or 'Invoice' column cause failure)

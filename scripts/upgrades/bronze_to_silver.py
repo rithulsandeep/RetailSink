@@ -1,103 +1,97 @@
-import pandas as pd
+import duckdb
 import os
 
-def clean_column_names(df):
-    """Converts column names to lower_snake_case."""
-    df.columns = [c.lower().replace(' ', '_') for c in df.columns]
-    return df
+def process_live_sales(con, bronze_path, silver_path):
+    print(f"--- ELT: Processing Live Sales Data (DuckDB) ---")
+    
+    # Ensure silver path parent exists
+    os.makedirs(os.path.dirname(silver_path), exist_ok=True)
+    
+    # SQL Transformation: 
+    # 1. Cast types
+    # 2. Add source_system and is_cancelled
+    # 3. Deduplicate using QUALIFY
+    query = f"""
+    COPY (
+        SELECT 
+            order_id::VARCHAR as order_id,
+            store_id::VARCHAR as store_id,
+            customer_id::VARCHAR as customer_id,
+            customer_city,
+            region,
+            product_category,
+            channel,
+            quantity,
+            price_per_unit,
+            discount,
+            payment_method,
+            holiday_flag,
+            order_status,
+            total_amount,
+            timestamp,
+            'pos' as source_system,
+            (order_status = 'Cancelled') as is_cancelled,
+            year,
+            month,
+            day
+        FROM read_parquet('{bronze_path}/**/*.parquet')
+        QUALIFY ROW_NUMBER() OVER(PARTITION BY order_id ORDER BY timestamp DESC) = 1
+    ) TO '{silver_path}' (FORMAT PARQUET, PARTITION_BY (year, month, day), OVERWRITE_OR_IGNORE);
+    """
+    con.execute(query)
+    print(f"Successfully transformed Live Sales to {silver_path}")
 
-def process_live_sales(bronze_path, silver_path):
-    print(f"--- Processing Live Sales Data (Bronze -> Silver) ---")
-    df = pd.read_parquet(bronze_path)
+def process_online_retail(con, bronze_path, silver_path):
+    print(f"--- ELT: Processing Online Retail Data (DuckDB) ---")
     
-    # 1. Clean column names
-    df = clean_column_names(df)
+    os.makedirs(os.path.dirname(silver_path), exist_ok=True)
     
-    # 2. Deduplicate
-    initial_count = len(df)
-    df = df.drop_duplicates(subset=['order_id'])
-    print(f"Removed {initial_count - len(df)} duplicate orders.")
-    
-    # 3. Data type casting
-    df['order_id'] = df['order_id'].astype(str)
-    df['store_id'] = df['store_id'].astype(str)
-    df['customer_id'] = df['customer_id'].astype(str)
-    
-    # 4. Enrichment
-    df['source_system'] = 'pos'
-    df['is_cancelled'] = df['order_status'] == 'Cancelled'
-    
-    # 5. Save to Silver
-    if not os.path.exists(silver_path):
-        os.makedirs(silver_path)
-        
-    print(f"Saving to {silver_path}...")
-    df.to_parquet(
-        silver_path,
-        engine='pyarrow',
-        compression='snappy',
-        index=False,
-        partition_cols=['year', 'month', 'day']
-    )
-    print("Live Sales Data processed successfully.")
-
-def process_online_retail(bronze_path, silver_path):
-    print(f"--- Processing Online Retail Data (Bronze -> Silver) ---")
-    df = pd.read_parquet(bronze_path)
-    
-    # 1. Rename and Clean columns
-    df = df.rename(columns={
-        'Invoice': 'invoice_id',
-        'StockCode': 'product_id',
-        'Description': 'product_description',
-        'Quantity': 'quantity',
-        'InvoiceDate': 'order_timestamp',
-        'Price': 'unit_price',
-        'Customer ID': 'customer_id',
-        'Country': 'country'
-    })
-    df = clean_column_names(df)
-    
-    # 2. Handle Missing Values
-    df['customer_id'] = df['customer_id'].fillna('Unknown').astype(str)
-    df['invoice_id'] = df['invoice_id'].astype(str)
-    df['product_id'] = df['product_id'].astype(str)
-    
-    # 3. Deduplicate
-    initial_count = len(df)
-    df = df.drop_duplicates()
-    print(f"Removed {initial_count - len(df)} duplicate rows.")
-    
-    # 4. Enrichment
-    df['source_system'] = 'erp'
-    df['total_amount'] = (df['quantity'] * df['unit_price']).round(2)
-    df['is_cancelled'] = df['invoice_id'].str.startswith('C')
-    
-    # 5. Save to Silver
-    if not os.path.exists(silver_path):
-        os.makedirs(silver_path)
-        
-    print(f"Saving to {silver_path}...")
-    df.to_parquet(
-        silver_path,
-        engine='pyarrow',
-        compression='snappy',
-        index=False,
-        partition_cols=['year', 'month', 'day']
-    )
-    print("Online Retail Data processed successfully.")
+    # SQL Transformation:
+    # 1. Rename columns
+    # 2. Fill missing customer_id
+    # 3. Calculate total_amount
+    # 4. Deduplicate (entire row)
+    query = f"""
+    COPY (
+        SELECT 
+            Invoice::VARCHAR as invoice_id,
+            StockCode::VARCHAR as product_id,
+            Description as product_description,
+            Quantity as quantity,
+            InvoiceDate as order_timestamp,
+            Price as unit_price,
+            COALESCE("Customer ID"::VARCHAR, 'Unknown') as customer_id,
+            Country as country,
+            'erp' as source_system,
+            ROUND(Quantity * Price, 2) as total_amount,
+            (invoice_id LIKE 'C%') as is_cancelled,
+            year,
+            month,
+            day
+        FROM read_parquet('{bronze_path}/**/*.parquet')
+        QUALIFY ROW_NUMBER() OVER(PARTITION BY invoice_id, product_id, quantity, order_timestamp) = 1
+    ) TO '{silver_path}' (FORMAT PARQUET, PARTITION_BY (year, month, day), OVERWRITE_OR_IGNORE);
+    """
+    con.execute(query)
+    print(f"Successfully transformed Online Retail to {silver_path}")
 
 if __name__ == "__main__":
-    BRONZE_ROOT = 'bronze'
-    SILVER_ROOT = 'silver'
+    BRONZE_ROOT = 'medallion/bronze'
+    SILVER_ROOT = 'medallion/silver'
     
-    # Process datasets
-    process_live_sales(
-        os.path.join(BRONZE_ROOT, 'live_sales_data'),
-        os.path.join(SILVER_ROOT, 'live_sales_data')
-    )
+    con = duckdb.connect()
     
-    process_online_retail(
-        os.path.join(BRONZE_ROOT, 'online_retail_II'),
-        os.path.join(SILVER_ROOT, 'online_retail_II')
-    )
+    try:
+        process_live_sales(
+            con,
+            os.path.join(BRONZE_ROOT, 'live_sales_data'),
+            os.path.join(SILVER_ROOT, 'live_sales_data')
+        )
+        
+        process_online_retail(
+            con,
+            os.path.join(BRONZE_ROOT, 'online_retail_II'),
+            os.path.join(SILVER_ROOT, 'online_retail_II')
+        )
+    finally:
+        con.close()
