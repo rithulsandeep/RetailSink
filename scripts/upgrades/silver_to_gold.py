@@ -4,6 +4,12 @@ import glob
 
 def run_gold_transformation(con, silver_root, gold_root):
     print(f"--- ELT: Transforming Silver to Gold (Unified Star Schema) ---")
+    
+    # Clean Gold directory to prevent stale files from inflating row counts
+    if os.path.exists(gold_root):
+        import shutil
+        print(f"Clearing old Gold layer data in {gold_root}...")
+        shutil.rmtree(gold_root)
     os.makedirs(gold_root, exist_ok=True)
     
     # Paths to Silver Parquet files
@@ -11,7 +17,7 @@ def run_gold_transformation(con, silver_root, gold_root):
     pos_billing = os.path.join(silver_root, 'pos_billing', '**', '*.parquet')
     warehouse_logs = os.path.join(silver_root, 'warehouse_logs', '**', '*.parquet')
 
-    # 1. dim_product (Unified from all silos)
+    # 1. dim_product (Truly Unified - unique per product_id)
     print("Creating dim_product...")
     con.execute(f"""
         CREATE OR REPLACE TABLE dim_product AS
@@ -21,16 +27,20 @@ def run_gold_transformation(con, silver_root, gold_root):
             product_description,
             source_system
         FROM (
-            SELECT DISTINCT product_id, product_description, 'ERP' as source_system FROM read_parquet('{online_retail}')
-            UNION
-            SELECT DISTINCT product_id, product_description, 'POS' as source_system FROM read_parquet('{pos_billing}')
-            UNION
-            SELECT DISTINCT product_id, product_name as product_description, 'WMS' as source_system FROM read_parquet('{warehouse_logs}')
+            SELECT product_id, product_description, source_system
+            FROM (
+                SELECT DISTINCT product_id, product_description, 'ERP' as source_system FROM read_parquet('{online_retail}')
+                UNION
+                SELECT DISTINCT product_id, product_description, 'POS' as source_system FROM read_parquet('{pos_billing}')
+                UNION
+                SELECT DISTINCT product_id, product_name as product_description, 'WMS' as source_system FROM read_parquet('{warehouse_logs}')
+            )
+            QUALIFY ROW_NUMBER() OVER(PARTITION BY product_id ORDER BY source_system DESC) = 1
         )
     """)
     con.execute(f"COPY dim_product TO '{os.path.join(gold_root, 'dim_product.parquet')}' (FORMAT PARQUET);")
 
-    # 2. dim_customer
+    # 2. dim_customer (Truly Unified - unique per customer_id)
     print("Creating dim_customer...")
     con.execute(f"""
         CREATE OR REPLACE TABLE dim_customer AS
@@ -39,9 +49,18 @@ def run_gold_transformation(con, silver_root, gold_root):
             customer_id,
             source
         FROM (
-            SELECT DISTINCT customer_id, 'Online' as source FROM read_parquet('{online_retail}')
-            UNION
-            SELECT DISTINCT customer_id, 'POS' as source FROM read_parquet('{pos_billing}')
+            SELECT customer_id, source
+            FROM (
+                SELECT DISTINCT customer_id, 'Online' as source FROM read_parquet('{online_retail}')
+                UNION
+                SELECT DISTINCT customer_id, 'POS' as source FROM read_parquet('{pos_billing}')
+            )
+            WHERE customer_id IS NOT NULL AND customer_id != 'Unknown'
+            QUALIFY ROW_NUMBER() OVER(PARTITION BY customer_id ORDER BY source) = 1
+            
+            UNION ALL
+            -- Ensure 'Unknown' remains in the dimension
+            SELECT 'Unknown' as customer_id, 'SYSTEM' as source
         )
     """)
     con.execute(f"COPY dim_customer TO '{os.path.join(gold_root, 'dim_customer.parquet')}' (FORMAT PARQUET);")
