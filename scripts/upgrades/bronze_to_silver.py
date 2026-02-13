@@ -8,7 +8,7 @@ def process_online_retail(con, bronze_path, silver_path):
     query = f"""
     COPY (
         SELECT 
-            TRIM(InvoiceNo)::VARCHAR as invoice_id,
+            REGEXP_REPLACE(TRIM(InvoiceNo), '^C', '', 'i')::VARCHAR as invoice_id,
             TRIM(UPPER(StockCode))::VARCHAR as product_id,
             COALESCE(NULLIF(TRIM(UPPER(Description)), ''), 'UNKNOWN') as product_description,
             Quantity::INTEGER as quantity,
@@ -19,7 +19,7 @@ def process_online_retail(con, bronze_path, silver_path):
             'Online' as source_channel,
             ROUND(Quantity::DOUBLE * UnitPrice::DOUBLE, 2) as total_amount,
             Cost_Price::DOUBLE as cost_price,
-            (invoice_id LIKE 'C%') as is_cancelled,
+            (TRIM(InvoiceNo) LIKE 'C%') as is_cancelled,
             'Unknown'::VARCHAR as city,
             COALESCE(year, YEAR(order_timestamp)) as year,
             COALESCE(month, MONTH(order_timestamp)) as month,
@@ -105,7 +105,7 @@ def process_shipments(con, bronze_path, silver_path):
     query = f"""
     COPY (
         SELECT 
-            invoice_id,
+            REGEXP_REPLACE(TRIM(invoice_id), '^C', '', 'i') as invoice_id,
             ship_timestamp,
             delivery_timestamp,
             TRIM(city) as city,

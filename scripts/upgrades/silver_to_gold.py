@@ -96,10 +96,16 @@ def run_gold_transformation(con, silver_root, gold_root):
     con.execute(f"""
         CREATE OR REPLACE TABLE fact_sales AS
         WITH combined_sales AS (
-            SELECT * FROM read_parquet(['{online_retail}', '{pos_billing}'], hive_partitioning=True, union_by_name=True)
+            SELECT 
+                REGEXP_REPLACE(invoice_id, '^C', '', 'i') as invoice_id,
+                * EXCLUDE (invoice_id)
+            FROM read_parquet(['{online_retail}', '{pos_billing}'], hive_partitioning=True, union_by_name=True)
         ),
         shipment_lookup AS (
-            SELECT invoice_id, city FROM read_parquet('{shipments}', hive_partitioning=True)
+            SELECT 
+                REGEXP_REPLACE(invoice_id, '^C', '', 'i') as invoice_id, 
+                city 
+            FROM read_parquet('{shipments}', hive_partitioning=True)
         )
         SELECT 
             MD5(s.invoice_id || s.product_id || quantity::VARCHAR || order_timestamp::VARCHAR) as sales_key,
@@ -158,7 +164,7 @@ def run_gold_transformation(con, silver_root, gold_root):
     con.execute(f"""
         CREATE OR REPLACE TABLE fact_shipments AS
         SELECT 
-            sh.invoice_id,
+            REGEXP_REPLACE(sh.invoice_id, '^C', '', 'i') as invoice_id,
             TRY_CAST(sh.ship_timestamp AS TIMESTAMP) as ship_timestamp,
             TRY_CAST(sh.delivery_timestamp AS TIMESTAMP) as delivery_timestamp,
             datediff('day', TRY_CAST(sh.ship_timestamp AS TIMESTAMP), TRY_CAST(sh.delivery_timestamp AS TIMESTAMP)) as delivery_days,
