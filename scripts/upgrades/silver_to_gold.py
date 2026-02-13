@@ -173,8 +173,15 @@ def run_gold_transformation(con, silver_root, gold_root):
     print("Creating fact_shipments (Delta)...")
     con.execute(f"""
         CREATE OR REPLACE TABLE fact_shipments_tmp AS
+        WITH unknown_cust AS (
+            SELECT customer_key FROM dim_customer_tmp WHERE customer_id = 'Unknown'
+        )
         SELECT 
             REGEXP_REPLACE(sh.invoice_id, '^C', '', 'i') as invoice_id,
+            COALESCE(ANY_VALUE(s.customer_key), (SELECT customer_key FROM unknown_cust)) as customer_key,
+            (YEAR(TRY_CAST(sh.delivery_timestamp AS TIMESTAMP)) * 10000 + 
+             MONTH(TRY_CAST(sh.delivery_timestamp AS TIMESTAMP)) * 100 + 
+             DAY(TRY_CAST(sh.delivery_timestamp AS TIMESTAMP)))::INTEGER as date_key,
             TRY_CAST(sh.ship_timestamp AS TIMESTAMP) as ship_timestamp,
             TRY_CAST(sh.delivery_timestamp AS TIMESTAMP) as delivery_timestamp,
             datediff('day', TRY_CAST(sh.ship_timestamp AS TIMESTAMP), TRY_CAST(sh.delivery_timestamp AS TIMESTAMP)) as delivery_days,
@@ -184,6 +191,8 @@ def run_gold_transformation(con, silver_root, gold_root):
             sh.month,
             sh.day
         FROM delta_scan('{shipments}') sh
+        LEFT JOIN fact_sales_tmp s ON REGEXP_REPLACE(sh.invoice_id, '^C', '', 'i') = s.invoice_id
+        GROUP BY ALL
     """)
     df_ship = con.query("SELECT * FROM fact_shipments_tmp").to_df()
     write_deltalake(os.path.join(gold_root, 'fact_shipments'), df_ship, mode="overwrite", partition_by=["year", "month", "day"])
