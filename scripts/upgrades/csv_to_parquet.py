@@ -90,3 +90,8 @@ if __name__ == "__main__":
         "CountryOfOrigin", "PackageWeight_kg", "StorageTemp_C", "BinLocation"
     ]
     process_file('landing/warehouse_inventory_data.csv', BRONZE_ROOT, 'EventDate', custom_headers=warehouse_headers)
+    # 4. Process Shipment Data
+    shipment_headers = [
+        "invoice_id", "order_timestamp", "ship_timestamp", "delivery_timestamp", "city", "country"
+    ]
+    process_file('landing/shipments_data.csv', BRONZE_ROOT, 'ship_timestamp', custom_headers=shipment_headers)

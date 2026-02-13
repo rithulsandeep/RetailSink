@@ -20,9 +20,10 @@ def process_online_retail(con, bronze_path, silver_path):
             ROUND(Quantity::DOUBLE * UnitPrice::DOUBLE, 2) as total_amount,
             Cost_Price::DOUBLE as cost_price,
             (invoice_id LIKE 'C%') as is_cancelled,
-            year,
-            month,
-            day
+            'Unknown'::VARCHAR as city,
+            COALESCE(year, YEAR(order_timestamp)) as year,
+            COALESCE(month, MONTH(order_timestamp)) as month,
+            COALESCE(day, DAY(order_timestamp)) as day
         FROM read_parquet('{bronze_path}/**/*.parquet')
         WHERE invoice_id IS NOT NULL 
           AND invoice_id != ''
@@ -53,9 +54,10 @@ def process_pos_billing(con, bronze_path, silver_path):
             ROUND(quantity * unit_price, 2) as total_amount,
             BuyPrice::DOUBLE as cost_price,
             (quantity < 0) as is_cancelled,
-            year,
-            month,
-            day
+            TRIM(StoreCity) as city,
+            COALESCE(year, YEAR(order_timestamp)) as year,
+            COALESCE(month, MONTH(order_timestamp)) as month,
+            COALESCE(day, DAY(order_timestamp)) as day
         FROM read_parquet('{bronze_path}/**/*.parquet')
         WHERE invoice_id IS NOT NULL 
           AND invoice_id != ''
@@ -96,6 +98,28 @@ def process_warehouse(con, bronze_path, silver_path):
     con.execute(query)
     print(f"Successfully normalized Warehouse Logs to {silver_path}")
 
+def process_shipments(con, bronze_path, silver_path):
+    print(f"--- ELT: Normalizing Shipment Data ---")
+    os.makedirs(os.path.dirname(silver_path), exist_ok=True)
+    
+    query = f"""
+    COPY (
+        SELECT 
+            invoice_id,
+            ship_timestamp,
+            delivery_timestamp,
+            TRIM(city) as city,
+            TRIM(country) as country,
+            year,
+            month,
+            day
+        FROM read_parquet('{bronze_path}/**/*.parquet')
+        QUALIFY ROW_NUMBER() OVER(PARTITION BY invoice_id) = 1
+    ) TO '{silver_path}' (FORMAT PARQUET, PARTITION_BY (year, month, day), OVERWRITE_OR_IGNORE);
+    """
+    con.execute(query)
+    print(f"Successfully normalized Shipments to {silver_path}")
+
 if __name__ == "__main__":
     BRONZE_ROOT = 'medallion/bronze'
     SILVER_ROOT = 'medallion/silver'
@@ -119,6 +143,12 @@ if __name__ == "__main__":
             con,
             os.path.join(BRONZE_ROOT, 'warehouse_inventory_data'),
             os.path.join(SILVER_ROOT, 'warehouse_logs')
+        )
+
+        process_shipments(
+            con,
+            os.path.join(BRONZE_ROOT, 'shipments_data'),
+            os.path.join(SILVER_ROOT, 'shipments')
         )
     finally:
         con.close()

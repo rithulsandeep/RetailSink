@@ -16,6 +16,7 @@ def run_gold_transformation(con, silver_root, gold_root):
     online_retail = os.path.join(silver_root, 'online_retail', '**', '*.parquet')
     pos_billing = os.path.join(silver_root, 'pos_billing', '**', '*.parquet')
     warehouse_logs = os.path.join(silver_root, 'warehouse_logs', '**', '*.parquet')
+    shipments = os.path.join(silver_root, 'shipments', '**', '*.parquet')
 
     # 1. dim_product (Truly Unified - unique per product_id)
     print("Creating dim_product...")
@@ -29,11 +30,11 @@ def run_gold_transformation(con, silver_root, gold_root):
         FROM (
             SELECT product_id, product_description, source_system
             FROM (
-                SELECT DISTINCT product_id, product_description, 'ERP' as source_system FROM read_parquet('{online_retail}')
+                SELECT DISTINCT product_id, product_description, 'ERP' as source_system FROM read_parquet('{online_retail}', hive_partitioning=True)
                 UNION
-                SELECT DISTINCT product_id, product_description, 'POS' as source_system FROM read_parquet('{pos_billing}')
+                SELECT DISTINCT product_id, product_description, 'POS' as source_system FROM read_parquet('{pos_billing}', hive_partitioning=True)
                 UNION
-                SELECT DISTINCT product_id, product_name as product_description, 'WMS' as source_system FROM read_parquet('{warehouse_logs}')
+                SELECT DISTINCT product_id, product_name as product_description, 'WMS' as source_system FROM read_parquet('{warehouse_logs}', hive_partitioning=True)
             )
             QUALIFY ROW_NUMBER() OVER(PARTITION BY product_id ORDER BY source_system DESC) = 1
         )
@@ -51,9 +52,9 @@ def run_gold_transformation(con, silver_root, gold_root):
         FROM (
             SELECT customer_id, source
             FROM (
-                SELECT DISTINCT customer_id, 'Online' as source FROM read_parquet('{online_retail}')
+                SELECT DISTINCT customer_id, 'Online' as source FROM read_parquet('{online_retail}', hive_partitioning=True)
                 UNION
-                SELECT DISTINCT customer_id, 'POS' as source FROM read_parquet('{pos_billing}')
+                SELECT DISTINCT customer_id, 'POS' as source FROM read_parquet('{pos_billing}', hive_partitioning=True)
             )
             WHERE customer_id IS NOT NULL AND customer_id != 'Unknown'
             QUALIFY ROW_NUMBER() OVER(PARTITION BY customer_id ORDER BY source) = 1
@@ -70,11 +71,13 @@ def run_gold_transformation(con, silver_root, gold_root):
     con.execute(f"""
         CREATE OR REPLACE TABLE dim_date AS
         WITH date_spine AS (
-            SELECT DISTINCT order_timestamp::DATE as full_date FROM read_parquet('{online_retail}')
+            SELECT DISTINCT order_timestamp::DATE as full_date FROM read_parquet('{online_retail}', hive_partitioning=True)
             UNION
-            SELECT DISTINCT order_timestamp::DATE as full_date FROM read_parquet('{pos_billing}')
+            SELECT DISTINCT order_timestamp::DATE as full_date FROM read_parquet('{pos_billing}', hive_partitioning=True)
             UNION
-            SELECT DISTINCT log_timestamp::DATE as full_date FROM read_parquet('{warehouse_logs}')
+            SELECT DISTINCT log_timestamp::DATE as full_date FROM read_parquet('{warehouse_logs}', hive_partitioning=True)
+            UNION
+            SELECT DISTINCT ship_timestamp::DATE as full_date FROM read_parquet('{shipments}', hive_partitioning=True)
         )
         SELECT 
             (YEAR(full_date) * 10000 + MONTH(full_date) * 100 + DAY(full_date))::INTEGER as date_key,
@@ -87,18 +90,20 @@ def run_gold_transformation(con, silver_root, gold_root):
     """)
     con.execute(f"COPY dim_date TO '{os.path.join(gold_root, 'dim_date.parquet')}' (FORMAT PARQUET);")
 
-    # 4. fact_sales (Unified Online + POS)
+    # 4. fact_sales (Unified Online + POS with City)
     print("Creating fact_sales...")
+    
     con.execute(f"""
         CREATE OR REPLACE TABLE fact_sales AS
         WITH combined_sales AS (
-            SELECT * FROM read_parquet('{online_retail}')
-            UNION ALL
-            SELECT * FROM read_parquet('{pos_billing}')
+            SELECT * FROM read_parquet(['{online_retail}', '{pos_billing}'], hive_partitioning=True, union_by_name=True)
+        ),
+        shipment_lookup AS (
+            SELECT invoice_id, city FROM read_parquet('{shipments}', hive_partitioning=True)
         )
         SELECT 
-            MD5(invoice_id || s.product_id || quantity::VARCHAR || order_timestamp::VARCHAR) as sales_key,
-            invoice_id,
+            MD5(s.invoice_id || s.product_id || quantity::VARCHAR || order_timestamp::VARCHAR) as sales_key,
+            s.invoice_id,
             customer_key,
             product_key,
             date_key,
@@ -108,13 +113,15 @@ def run_gold_transformation(con, silver_root, gold_root):
             total_amount,
             source_channel,
             is_cancelled,
+            COALESCE(NULLIF(s.city, 'Unknown'), sh.city, 'Unknown') as city,
             s.year,
             s.month,
             s.day
         FROM combined_sales s
+        LEFT JOIN shipment_lookup sh ON s.invoice_id = sh.invoice_id
         JOIN dim_customer c ON s.customer_id = c.customer_id
         JOIN dim_product p ON s.product_id = p.product_id
-        JOIN dim_date d ON s.order_timestamp::DATE = d.full_date
+        JOIN dim_date d ON TRY_CAST(s.order_timestamp AS DATE) = d.full_date
     """)
     
     fact_sales_path = os.path.join(gold_root, 'fact_sales')
@@ -137,7 +144,7 @@ def run_gold_transformation(con, silver_root, gold_root):
             w.year,
             w.month,
             w.day
-        FROM read_parquet('{warehouse_logs}') w
+        FROM read_parquet('{warehouse_logs}', hive_partitioning=True) w
         JOIN dim_product p ON w.product_id = p.product_id
         JOIN dim_date d ON w.log_timestamp::DATE = d.full_date
     """)
@@ -145,6 +152,27 @@ def run_gold_transformation(con, silver_root, gold_root):
     fact_inv_path = os.path.join(gold_root, 'fact_inventory')
     os.makedirs(fact_inv_path, exist_ok=True)
     con.execute(f"COPY fact_inventory TO '{fact_inv_path}' (FORMAT PARQUET, PARTITION_BY (year, month, day), OVERWRITE_OR_IGNORE);")
+    
+    # 6. fact_shipments
+    print("Creating fact_shipments...")
+    con.execute(f"""
+        CREATE OR REPLACE TABLE fact_shipments AS
+        SELECT 
+            sh.invoice_id,
+            TRY_CAST(sh.ship_timestamp AS TIMESTAMP) as ship_timestamp,
+            TRY_CAST(sh.delivery_timestamp AS TIMESTAMP) as delivery_timestamp,
+            datediff('day', TRY_CAST(sh.ship_timestamp AS TIMESTAMP), TRY_CAST(sh.delivery_timestamp AS TIMESTAMP)) as delivery_days,
+            sh.city,
+            sh.country,
+            sh.year,
+            sh.month,
+            sh.day
+        FROM read_parquet('{shipments}', hive_partitioning=True) sh
+    """)
+    
+    fact_ship_path = os.path.join(gold_root, 'fact_shipments')
+    os.makedirs(fact_ship_path, exist_ok=True)
+    con.execute(f"COPY fact_shipments TO '{fact_ship_path}' (FORMAT PARQUET, PARTITION_BY (year, month, day), OVERWRITE_OR_IGNORE);")
     
     print(f"Successfully created Gold layer (Unified Star Schema) in {gold_root}")
 

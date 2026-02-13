@@ -1,0 +1,164 @@
+{
+  "dim_customer": [
+    {
+      "column_name": "customer_key",
+      "column_type": "BIGINT"
+    },
+    {
+      "column_name": "customer_id",
+      "column_type": "VARCHAR"
+    },
+    {
+      "column_name": "source",
+      "column_type": "VARCHAR"
+    }
+  ],
+  "dim_product": [
+    {
+      "column_name": "product_key",
+      "column_type": "BIGINT"
+    },
+    {
+      "column_name": "product_id",
+      "column_type": "VARCHAR"
+    },
+    {
+      "column_name": "product_description",
+      "column_type": "VARCHAR"
+    },
+    {
+      "column_name": "source_system",
+      "column_type": "VARCHAR"
+    }
+  ],
+  "dim_date": [
+    {
+      "column_name": "date_key",
+      "column_type": "INTEGER"
+    },
+    {
+      "column_name": "full_date",
+      "column_type": "DATE"
+    },
+    {
+      "column_name": "day",
+      "column_type": "BIGINT"
+    },
+    {
+      "column_name": "month",
+      "column_type": "BIGINT"
+    },
+    {
+      "column_name": "year",
+      "column_type": "BIGINT"
+    },
+    {
+      "column_name": "is_weekend",
+      "column_type": "BOOLEAN"
+    }
+  ],
+  "fact_sales": [
+    {
+      "column_name": "sales_key",
+      "column_type": "VARCHAR"
+    },
+    {
+      "column_name": "invoice_id",
+      "column_type": "VARCHAR"
+    },
+    {
+      "column_name": "customer_key",
+      "column_type": "BIGINT"
+    },
+    {
+      "column_name": "product_key",
+      "column_type": "BIGINT"
+    },
+    {
+      "column_name": "date_key",
+      "column_type": "INTEGER"
+    },
+    {
+      "column_name": "quantity",
+      "column_type": "INTEGER"
+    },
+    {
+      "column_name": "unit_price",
+      "column_type": "DOUBLE"
+    },
+    {
+      "column_name": "cost_price",
+      "column_type": "DOUBLE"
+    },
+    {
+      "column_name": "total_amount",
+      "column_type": "DOUBLE"
+    },
+    {
+      "column_name": "source_channel",
+      "column_type": "VARCHAR"
+    },
+    {
+      "column_name": "is_cancelled",
+      "column_type": "BOOLEAN"
+    },
+    {
+      "column_name": "day",
+      "column_type": "BIGINT"
+    },
+    {
+      "column_name": "month",
+      "column_type": "BIGINT"
+    },
+    {
+      "column_name": "year",
+      "column_type": "BIGINT"
+    }
+  ],
+  "fact_inventory": [
+    {
+      "column_name": "log_id",
+      "column_type": "VARCHAR"
+    },
+    {
+      "column_name": "product_key",
+      "column_type": "BIGINT"
+    },
+    {
+      "column_name": "date_key",
+      "column_type": "INTEGER"
+    },
+    {
+      "column_name": "movement_type",
+      "column_type": "VARCHAR"
+    },
+    {
+      "column_name": "qty_change",
+      "column_type": "INTEGER"
+    },
+    {
+      "column_name": "warehouse_id",
+      "column_type": "VARCHAR"
+    },
+    {
+      "column_name": "supplier",
+      "column_type": "VARCHAR"
+    },
+    {
+      "column_name": "weight_kg",
+      "column_type": "DOUBLE"
+    },
+    {
+      "column_name": "day",
+      "column_type": "BIGINT"
+    },
+    {
+      "column_name": "month",
+      "column_type": "BIGINT"
+    },
+    {
+      "column_name": "year",
+      "column_type": "BIGINT"
+    }
+  ]
+}

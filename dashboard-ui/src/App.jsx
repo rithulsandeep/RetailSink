@@ -25,12 +25,13 @@ ChartJS.register(
     Legend
 );
 
-const API_BASE = 'http://localhost:8000/api/kpi';
+const API_BASE = 'http://localhost:8001/api/kpi';
 
-const KPICard = ({ label, value, loading }) => (
+const KPICard = ({ label, value, loading, subtext }) => (
     <div className="kpi-card">
         <div className="kpi-value">{loading ? '...' : value}</div>
         <div className="kpi-label">{label}</div>
+        {subtext && <div className="kpi-subtext">{subtext}</div>}
     </div>
 );
 
@@ -45,7 +46,6 @@ const LineageNode = ({ name, count, layer }) => (
 );
 
 const MedallionLineage = ({ stats }) => {
-    // Group stats by layer
     const landing = stats.filter(s => s.layer === 'Landing');
     const bronze = stats.filter(s => s.layer === 'Bronze');
     const silver = stats.filter(s => s.layer === 'Silver');
@@ -63,9 +63,6 @@ const MedallionLineage = ({ stats }) => {
                     <span className="status-indicator"></span>
                     <strong>Data Transformation Lineage (Data Funnel)</strong>
                 </div>
-                <div style={{ fontSize: '12px', color: '#666' }}>
-                    Visualizing 4 pipeline stages
-                </div>
             </div>
             <div className="lineage-container">
                 <LineageNode layer="Landing" name="Raw Sources" count={totalLanding} />
@@ -77,7 +74,7 @@ const MedallionLineage = ({ stats }) => {
                 <LineageNode layer="Gold" name="Business Ready" count={totalGoldFact} />
             </div>
             <div style={{ marginTop: '20px', display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px' }}>
-                <div className="lineage-subtext">CSV/XLSX raw files from ERP, POS, WMS systems.</div>
+                <div className="lineage-subtext">CSV/XLSX raw files from ERP, POS, WMS, Logistics.</div>
                 <div className="lineage-subtext">Partitioned Parquet. Preservation of original data.</div>
                 <div className="lineage-subtext">Cleaned, Deduplicated, Typed, and Normalized.</div>
                 <div className="lineage-subtext">Unified Star Schema (Facts & Dimensions).</div>
@@ -87,9 +84,13 @@ const MedallionLineage = ({ stats }) => {
 };
 
 function App() {
+    const [activeTab, setActiveTab] = useState('commercial');
     const [summary, setSummary] = useState({});
     const [revenueTrend, setRevenueTrend] = useState([]);
     const [topProducts, setTopProducts] = useState([]);
+    const [citySales, setCitySales] = useState([]);
+    const [opsMetrics, setOpsMetrics] = useState({});
+    const [custInsights, setCustInsights] = useState({});
     const [channelDist, setChannelDist] = useState([]);
     const [inventory, setInventory] = useState([]);
     const [lineageStats, setLineageStats] = useState([]);
@@ -98,10 +99,13 @@ function App() {
     const fetchData = async () => {
         setLoading(true);
         try {
-            const [sumRes, revRes, prodRes, chanRes, invRes, linRes] = await Promise.all([
+            const [sumRes, revRes, prodRes, cityRes, opsRes, custRes, chanRes, invRes, linRes] = await Promise.all([
                 fetch(`${API_BASE}/summary`).then(r => r.json()),
                 fetch(`${API_BASE}/revenue-trend`).then(r => r.json()),
                 fetch(`${API_BASE}/top-products`).then(r => r.json()),
+                fetch(`${API_BASE}/city-sales`).then(r => r.json()),
+                fetch(`${API_BASE}/operations-metrics`).then(r => r.json()),
+                fetch(`${API_BASE}/customer-insights`).then(r => r.json()),
                 fetch(`${API_BASE}/sales-channel`).then(r => r.json()),
                 fetch(`${API_BASE}/inventory-status`).then(r => r.json()),
                 fetch(`${API_BASE}/lineage-stats`).then(r => r.json()),
@@ -110,6 +114,9 @@ function App() {
             setSummary(sumRes);
             setRevenueTrend(revRes);
             setTopProducts(prodRes);
+            setCitySales(cityRes);
+            setOpsMetrics(opsRes);
+            setCustInsights(custRes);
             setChannelDist(chanRes);
             setInventory(invRes);
             setLineageStats(linRes);
@@ -136,29 +143,31 @@ function App() {
         }]
     };
 
-    const productData = {
-        labels: topProducts.map(d => d.product_description),
+    const citySalesData = {
+        labels: citySales.map(d => d.city),
         datasets: [{
-            label: 'Revenue by Product',
-            data: topProducts.map(d => d.total_revenue),
-            backgroundColor: '#0078d4',
+            label: 'Revenue by City',
+            data: citySales.map(d => d.revenue),
+            backgroundColor: '#5ca1e1',
         }]
     };
 
-    const channelData = {
-        labels: channelDist.map(d => d.source_channel),
+    const seasonalData = {
+        labels: opsMetrics.seasonal_demand?.map(d => `Month ${d.month}`) || [],
         datasets: [{
-            data: channelDist.map(d => d.revenue),
-            backgroundColor: ['#0078d4', '#2b88d8', '#5ca1e1', '#8dbbe9', '#bed5f2'],
+            label: 'Seasonal Demand',
+            data: opsMetrics.seasonal_demand?.map(d => d.revenue) || [],
+            borderColor: '#ffb900',
+            backgroundColor: 'rgba(255, 185, 0, 0.1)',
+            fill: true,
         }]
     };
 
-    const inventoryData = {
-        labels: inventory.map(d => d.product_description),
+    const segmentData = {
+        labels: custInsights.segments?.map(s => s.segment) || [],
         datasets: [{
-            label: 'Current Stock',
-            data: inventory.map(d => d.current_stock),
-            backgroundColor: '#107c10',
+            data: custInsights.segments?.map(s => s.count) || [],
+            backgroundColor: ['#0078d4', '#107c10'],
         }]
     };
 
@@ -175,63 +184,114 @@ function App() {
     return (
         <div className="dashboard">
             <header className="header">
-                Retail Analytics Dashboard (Mimicking Power BI)
+                <div>Retail Intelligence Platform</div>
+                <div className="tabs">
+                    <button className={activeTab === 'commercial' ? 'active' : ''} onClick={() => setActiveTab('commercial')}>Commercial</button>
+                    <button className={activeTab === 'operations' ? 'active' : ''} onClick={() => setActiveTab('operations')}>Operations</button>
+                    <button className={activeTab === 'customer' ? 'active' : ''} onClick={() => setActiveTab('customer')}>Customer</button>
+                    <button className={activeTab === 'lineage' ? 'active' : ''} onClick={() => setActiveTab('lineage')}>Lineage</button>
+                </div>
             </header>
 
             <main className="main-content">
-                <KPICard label="Total Revenue" value={formatCurrency(summary.total_revenue)} loading={loading} />
-                <KPICard label="Total Orders" value={formatNumber(summary.total_orders)} loading={loading} />
-                <KPICard label="Total Customers" value={formatNumber(summary.total_customers)} loading={loading} />
-                <div className="kpi-card">
-                    <button onClick={fetchData} style={{
-                        padding: '8px 16px',
-                        backgroundColor: '#0078d4',
-                        color: 'white',
-                        border: 'none',
-                        borderRadius: '4px',
-                        cursor: 'pointer',
-                        fontWeight: '600'
-                    }}>
-                        Refresh Data
-                    </button>
-                    <div className="kpi-label">Last updated: {new Date().toLocaleTimeString()}</div>
+                <div className="kpi-grid">
+                    <KPICard label="Total Revenue" value={formatCurrency(summary.total_revenue)} loading={loading} />
+                    <KPICard label="Total Orders" value={formatNumber(summary.total_orders)} loading={loading} />
+                    <KPICard label="Avg Delivery" value={`${opsMetrics.avg_delivery_days} Days`} loading={loading} subtext="Across all shipments" />
+                    <KPICard label="Customer CLV" value={formatCurrency(custInsights.clv)} loading={loading} subtext="Avg Lifetime Value" />
                 </div>
 
-                {loading ? (
-                    <div className="chart-container full-chart" style={{ textAlign: 'center', padding: '100px' }}>
-                        Loading Data Lineage...
+                {activeTab === 'commercial' && (
+                    <div className="tab-content">
+                        <div className="chart-container full-chart">
+                            <div className="chart-header">City-wise Sales Performance</div>
+                            <div style={{ height: '300px' }}>
+                                <Bar data={citySalesData} options={{ maintainAspectRatio: false }} />
+                            </div>
+                        </div>
+                        <div className="chart-container">
+                            <div className="chart-header">Revenue Trend (12 Months)</div>
+                            <div style={{ height: '300px' }}>
+                                <Line data={revenueData} options={{ maintainAspectRatio: false }} />
+                            </div>
+                        </div>
+                        <div className="chart-container">
+                            <div className="chart-header">Top 5 Products</div>
+                            <div style={{ height: '300px' }}>
+                                <Bar data={{
+                                    labels: topProducts.map(p => p.product_description),
+                                    datasets: [{ label: 'Revenue', data: topProducts.map(p => p.total_revenue), backgroundColor: '#0078d4' }]
+                                }} options={{ indexAxis: 'y', maintainAspectRatio: false }} />
+                            </div>
+                        </div>
                     </div>
-                ) : (
-                    <MedallionLineage stats={lineageStats} />
                 )}
 
-                <div className="chart-container full-chart">
-                    <div className="chart-header">Revenue Trend (Last 12 Months)</div>
-                    <div style={{ height: '300px' }}>
-                        {loading ? 'Loading...' : <Line data={revenueData} options={{ maintainAspectRatio: false }} />}
+                {activeTab === 'operations' && (
+                    <div className="tab-content">
+                        <div className="chart-container full-chart">
+                            <div className="chart-header">Seasonal Demand Trends</div>
+                            <div style={{ height: '300px' }}>
+                                <Line data={seasonalData} options={{ maintainAspectRatio: false }} />
+                            </div>
+                        </div>
+                        <div className="chart-container">
+                            <div className="chart-header">Inventory Levels (Top Products)</div>
+                            <div style={{ height: '300px' }}>
+                                <Bar data={{
+                                    labels: inventory.map(d => d.product_description),
+                                    datasets: [{ label: 'Stock', data: inventory.map(d => d.current_stock), backgroundColor: '#107c10' }]
+                                }} options={{ maintainAspectRatio: false }} />
+                            </div>
+                        </div>
+                        <div className="chart-container">
+                            <div className="chart-header">Inventory Turnover Ratio</div>
+                            <div className="kpi-value-large" style={{ marginTop: '50px' }}>
+                                {opsMetrics.turnover_ratio}x
+                            </div>
+                            <div className="lineage-subtext" style={{ textAlign: 'center' }}>
+                                High turnover indicates efficient inventory management.
+                            </div>
+                        </div>
                     </div>
-                </div>
+                )}
 
-                <div className="chart-container">
-                    <div className="chart-header">Top 5 Products by Revenue</div>
-                    <div style={{ height: '300px' }}>
-                        {loading ? 'Loading...' : <Bar data={productData} options={{ indexAxis: 'y', maintainAspectRatio: false }} />}
+                {activeTab === 'customer' && (
+                    <div className="tab-content">
+                        <div className="chart-container">
+                            <div className="chart-header">New vs Returning Shoppers</div>
+                            <div style={{ height: '300px', display: 'flex', justifyContent: 'center' }}>
+                                <Doughnut data={segmentData} options={{ maintainAspectRatio: false }} />
+                            </div>
+                        </div>
+                        <div className="chart-container">
+                            <div className="chart-header">"Market Basket" Insights</div>
+                            <div className="market-basket-list">
+                                {custInsights.market_basket?.map((item, i) => (
+                                    <div key={i} className="basket-item">
+                                        <strong>{item.item_a}</strong> + <strong>{item.item_b}</strong>
+                                        <div className="basket-freq">{item.frequency} times paired</div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                        <div className="chart-container full-chart">
+                            <div className="chart-header">Revenue by Sales Channel</div>
+                            <div style={{ height: '200px' }}>
+                                <Bar data={{
+                                    labels: channelDist.map(d => d.source_channel),
+                                    datasets: [{ label: 'Revenue', data: channelDist.map(d => d.revenue), backgroundColor: '#bed5f2' }]
+                                }} options={{ indexAxis: 'y', maintainAspectRatio: false }} />
+                            </div>
+                        </div>
                     </div>
-                </div>
+                )}
 
-                <div className="chart-container">
-                    <div className="chart-header">Revenue by Sales Channel</div>
-                    <div style={{ height: '300px', display: 'flex', justifyContent: 'center' }}>
-                        {loading ? 'Loading...' : <Doughnut data={channelData} options={{ maintainAspectRatio: false }} />}
+                {activeTab === 'lineage' && (
+                    <div className="tab-content">
+                        <MedallionLineage stats={lineageStats} />
                     </div>
-                </div>
-
-                <div className="chart-container full-chart">
-                    <div className="chart-header">Inventory Levels (Top Products)</div>
-                    <div style={{ height: '300px' }}>
-                        {loading ? 'Loading...' : <Bar data={inventoryData} options={{ maintainAspectRatio: false }} />}
-                    </div>
-                </div>
+                )}
             </main>
         </div>
     );
