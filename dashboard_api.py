@@ -4,6 +4,7 @@ import duckdb
 import pandas as pd
 import json
 import os
+import threading
 
 app = FastAPI(title="RetailSink Analytics API")
 
@@ -27,6 +28,7 @@ KPI_SUMMARY = "medallion/gold/kpi_summary"
 # Persistent DuckDB connection initialized once at startup
 db_conn = duckdb.connect()
 db_conn.execute("INSTALL delta; LOAD delta;")
+db_lock = threading.Lock()
 
 # Result Cache
 cache = {}
@@ -52,16 +54,14 @@ def create_views():
         "silver_wh": "medallion/silver/warehouse_logs",
         "silver_ship": "medallion/silver/shipments"
     }
-    for view_name, path in tables.items():
-        if os.path.exists(path):
-            db_conn.execute(f"CREATE OR REPLACE VIEW {view_name} AS SELECT * FROM delta_scan('{path}')")
+    with db_lock:
+        for view_name, path in tables.items():
+            if os.path.exists(path):
+                db_conn.execute(f"CREATE OR REPLACE VIEW {view_name} AS SELECT * FROM delta_scan('{path}')")
     print("DuckDB Views Refreshed & Cache Cleared.")
 
 # Initial view creation
 create_views()
-
-def get_db():
-    return db_conn
 
 @app.get("/api/admin/refresh")
 def refresh_data():
@@ -72,9 +72,9 @@ def refresh_data():
 @app.get("/api/kpi/summary")
 def get_summary_kpis():
     if "summary" in cache: return cache["summary"]
-    db = get_db()
     query = "SELECT * FROM kpi_summary"
-    res = db.query(query).to_df().to_dict(orient='records')[0]
+    with db_lock:
+        res = db_conn.query(query).to_df().to_dict(orient='records')[0]
     cache["summary"] = res
     return res
 
@@ -82,7 +82,6 @@ def get_summary_kpis():
 def get_revenue_trend(period: str = "month"):
     key = f"revenue_trend_{period}"
     if key in cache: return cache[key]
-    db = get_db()
     group_col = "month" if period == "month" else "day"
         
     query = f"""
@@ -95,7 +94,8 @@ def get_revenue_trend(period: str = "month"):
     ORDER BY year DESC, {group_col} DESC
     LIMIT 12
     """
-    df = db.query(query).to_df()
+    with db_lock:
+        df = db_conn.query(query).to_df()
     df = df.sort_values(['year', period])
     res = df.to_dict(orient='records')
     cache[key] = res
@@ -105,7 +105,6 @@ def get_revenue_trend(period: str = "month"):
 def get_top_products(limit: int = 5):
     key = f"top_products_{limit}"
     if key in cache: return cache[key]
-    db = get_db()
     query = f"""
     SELECT 
         p.product_description,
@@ -117,14 +116,14 @@ def get_top_products(limit: int = 5):
     ORDER BY total_revenue DESC
     LIMIT {limit}
     """
-    res = db.query(query).to_df().to_dict(orient='records')
+    with db_lock:
+        res = db_conn.query(query).to_df().to_dict(orient='records')
     cache[key] = res
     return res
 
 @app.get("/api/kpi/city-sales")
 def get_city_sales():
     if "city_sales" in cache: return cache["city_sales"]
-    db = get_db()
     query = f"""
     SELECT 
         city,
@@ -134,32 +133,32 @@ def get_city_sales():
     ORDER BY revenue DESC
     LIMIT 10
     """
-    res = db.query(query).to_df().to_dict(orient='records')
+    with db_lock:
+        res = db_conn.query(query).to_df().to_dict(orient='records')
     cache["city_sales"] = res
     return res
 
 @app.get("/api/kpi/operations-metrics")
 def get_operations_metrics():
     if "ops_metrics" in cache: return cache["ops_metrics"]
-    db = get_db()
     
     delivery_query = "SELECT AVG(delivery_days) as avg_delivery_days FROM fact_shipments"
-    avg_delivery = db.query(delivery_query).to_df().iloc[0,0]
-    
     turnover_query = """
     SELECT 
         (SELECT SUM(total_amount) FROM fact_sales) / 
         COALESCE(NULLIF(SUM(ABS(qty_change)), 0), 1) as turnover_ratio
     FROM fact_inventory
     """
-    turnover = db.query(turnover_query).to_df().iloc[0,0]
-    
     seasonal_query = """
     SELECT month, SUM(total_amount) as revenue 
     FROM fact_sales
     GROUP BY month ORDER BY month
     """
-    seasonal = db.query(seasonal_query).to_df().to_dict(orient='records')
+    
+    with db_lock:
+        avg_delivery = db_conn.query(delivery_query).to_df().iloc[0,0]
+        turnover = db_conn.query(turnover_query).to_df().iloc[0,0]
+        seasonal = db_conn.query(seasonal_query).to_df().to_dict(orient='records')
     
     res = {
         "avg_delivery_days": round(float(avg_delivery), 2) if avg_delivery else 0,
@@ -172,7 +171,6 @@ def get_operations_metrics():
 @app.get("/api/kpi/customer-insights")
 def get_customer_insights():
     if "cust_insights" in cache: return cache["cust_insights"]
-    db = get_db()
     
     retention_query = """
     WITH cust_orders AS (
@@ -186,8 +184,6 @@ def get_customer_insights():
     FROM cust_orders
     GROUP BY Segment
     """
-    segments = db.query(retention_query).to_df().to_dict(orient='records')
-    
     clv_query = """
     SELECT AVG(customer_revenue) as clv
     FROM (
@@ -196,8 +192,6 @@ def get_customer_insights():
         GROUP BY customer_key
     )
     """
-    clv = db.query(clv_query).to_df().iloc[0,0]
-    
     basket_query = """
     WITH target_invoices AS (
         SELECT DISTINCT invoice_id 
@@ -217,7 +211,11 @@ def get_customer_insights():
     ORDER BY frequency DESC
     LIMIT 5
     """
-    basket = db.query(basket_query).to_df().to_dict(orient='records')
+    
+    with db_lock:
+        segments = db_conn.query(retention_query).to_df().to_dict(orient='records')
+        clv = db_conn.query(clv_query).to_df().iloc[0,0]
+        basket = db_conn.query(basket_query).to_df().to_dict(orient='records')
     
     res = {
         "segments": segments,
@@ -230,16 +228,15 @@ def get_customer_insights():
 @app.get("/api/kpi/sales-channel")
 def get_sales_channel_distribution():
     if "channel_dist" in cache: return cache["channel_dist"]
-    db = get_db()
     query = "SELECT source_channel, SUM(total_amount) as revenue FROM fact_sales GROUP BY source_channel"
-    res = db.query(query).to_df().to_dict(orient='records')
+    with db_lock:
+        res = db_conn.query(query).to_df().to_dict(orient='records')
     cache["channel_dist"] = res
     return res
 
 @app.get("/api/kpi/inventory-status")
 def get_inventory_status():
     if "inv_status" in cache: return cache["inv_status"]
-    db = get_db()
     query = """
     SELECT 
         p.product_description,
@@ -251,14 +248,14 @@ def get_inventory_status():
     ORDER BY current_stock DESC
     LIMIT 10
     """
-    res = db.query(query).to_df().to_dict(orient='records')
+    with db_lock:
+        res = db_conn.query(query).to_df().to_dict(orient='records')
     cache["inv_status"] = res
     return res
 
 @app.get("/api/kpi/lineage-stats")
 def get_lineage_stats():
     if "lineage_stats" in cache: return cache["lineage_stats"]
-    db = get_db()
     stats = []
     
     # Landing (CSVs)
@@ -268,26 +265,27 @@ def get_lineage_stats():
         "Warehouse (Landing)": "landing/warehouse_inventory_data.csv",
         "Shipments (Landing)": "landing/shipments_data.csv"
     }
-    for name, path in landing_paths.items():
-        if os.path.exists(path):
-            try:
-                count = db.execute(f"SELECT COUNT(*) FROM read_csv_auto('{path}')").fetchone()[0]
-                stats.append({"layer": "Landing", "name": name, "count": count})
-            except: pass
+    with db_lock:
+        for name, path in landing_paths.items():
+            if os.path.exists(path):
+                try:
+                    count = db_conn.execute(f"SELECT COUNT(*) FROM read_csv_auto('{path}')").fetchone()[0]
+                    stats.append({"layer": "Landing", "name": name, "count": count})
+                except: pass
 
-    # Bronze to Gold using Views
-    layers = [
-        ("Bronze", {"Retail": "bronze_retail", "POS": "bronze_pos", "WH": "bronze_wh", "Ship": "bronze_ship"}),
-        ("Silver", {"Retail": "silver_retail", "POS": "silver_pos", "WH": "silver_wh", "Ship": "silver_ship"}),
-        ("Gold", {"dim_product": "dim_product", "dim_customer": "dim_customer", "fact_sales": "fact_sales", "fact_inventory": "fact_inventory"})
-    ]
-    
-    for layer_name, entities in layers:
-        for name, view in entities.items():
-            try:
-                count = db.execute(f"SELECT COUNT(*) FROM {view}").fetchone()[0]
-                stats.append({"layer": layer_name, "name": f"{name} ({layer_name})", "count": count})
-            except: pass
+        # Bronze to Gold using Views
+        layers = [
+            ("Bronze", {"Retail": "bronze_retail", "POS": "bronze_pos", "WH": "bronze_wh", "Ship": "bronze_ship"}),
+            ("Silver", {"Retail": "silver_retail", "POS": "silver_pos", "WH": "silver_wh", "Ship": "silver_ship"}),
+            ("Gold", {"dim_product": "dim_product", "dim_customer": "dim_customer", "fact_sales": "fact_sales", "fact_inventory": "fact_inventory"})
+        ]
+        
+        for layer_name, entities in layers:
+            for name, view in entities.items():
+                try:
+                    count = db_conn.execute(f"SELECT COUNT(*) FROM {view}").fetchone()[0]
+                    stats.append({"layer": layer_name, "name": f"{name} ({layer_name})", "count": count})
+                except: pass
 
     cache["lineage_stats"] = stats
     return stats
