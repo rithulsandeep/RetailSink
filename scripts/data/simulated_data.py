@@ -1,142 +1,131 @@
-import argparse
-import time
+import os
 import random
 import pandas as pd
+import numpy as np
 from faker import Faker
-from datetime import datetime
-
-# ----------------------------
-# ARGUMENTS
-# ----------------------------
-parser = argparse.ArgumentParser()
-parser.add_argument("--store_id", type=int, required=True)
-args = parser.parse_args()
-
-STORE_ID = args.store_id
-
-fake = Faker("en_IN")
+from datetime import datetime, timedelta
 
 # ----------------------------
 # CONFIG
 # ----------------------------
-OUTPUT_FILE = "landing/live_sales_data.csv"
+NUM_ROWS = 10000
+OUTPUT_FILE = "landing/pos_billing_data.csv"
+fake = Faker("en_IN")
 
-CATEGORIES = ["Electronics", "Fashion", "Groceries", "Home", "Beauty"]
-CHANNELS = ["Store", "Online"]
-PAYMENT_METHODS = ["Card", "UPI", "Cash", "NetBanking"]
-REGIONS = {
-    "Mumbai": "West",
-    "Pune": "West",
-    "Delhi": "North",
-    "Noida": "North",
-    "Bengaluru": "South",
-    "Chennai": "South",
-    "Kolkata": "East"
-}
-
-# Simulated loyal customers pool
-CUSTOMER_POOL = list(range(1, 501))
+CITIES = ["Mumbai", "Delhi", "Bengaluru", "Hyderabad", "Ahmedabad", "Chennai", "Kolkata", "Pune", "Jaipur", "Lucknow"]
+NATIONS = ["India"]
 
 # ----------------------------
-# BEHAVIOR ENGINE
+# DATA GENERATOR
 # ----------------------------
-def calculate_quantity(base_quantity, timestamp, channel):
-    multiplier = 1.0
-    weekday = timestamp.weekday()
-    hour = timestamp.hour
+def generate_messy_pos_data(num_rows=10000):
+    data = []
+    
+    # Pre-generate some products for consistency
+    product_pool = [
+        {"ItemCode": f"POS_{fake.unique.random_int(1000, 9999)}", "ProductName": fake.catch_phrase()}
+        for _ in range(150)
+    ]
 
-    # Weekend boost
-    if weekday >= 5:
-        multiplier *= 1.4
+    print(f"Generating {num_rows} rows of messy POS billing data...")
 
-    # Store evening rush
-    if channel == "Store" and 17 <= hour <= 21:
-        multiplier *= 1.3
+    for i in range(num_rows):
+        # 3% chance of multi-item bill (duplicate BillNo)
+        if i > 0 and random.random() < 0.03:
+            bill_no = data[-1]["BillNo"]
+        else:
+            bill_no = f"POS-{fake.unique.random_int(200000, 899999)}"
 
-    # Online late-night spike
-    if channel == "Online" and 21 <= hour <= 23:
-        multiplier *= 1.5
+        product = random.choice(product_pool)
+        
+        # 5% chance of missing LoyaltyID
+        loyalty_id = fake.random_int(10000, 99999) if random.random() > 0.05 else None
+        
+        # Synonyms and Realism
+        product_name = product["ProductName"]
+        # 2% chance of leading/trailing whitespaces
+        if random.random() < 0.02:
+            product_name = f"  {product_name}  "
+        
+        # Qty: 1% chance of garbage string, 1% negative
+        qty = fake.random_int(1, 12)
+        if random.random() < 0.01:
+            qty = random.choice(["NA", "?", "UNKNOWN"])
+        elif random.random() < 0.01:
+            qty = -qty
 
-    return max(1, int(base_quantity * multiplier))
+        # Rate: 1% chance of garbage, 1% negative
+        rate = round(random.uniform(49, 4999), 2)
+        if random.random() < 0.01:
+            rate = random.choice(["MISSING", "null"])
+        elif random.random() < 0.01:
+            rate = -rate
 
+        buy_price = round(float(rate) * random.uniform(0.4, 0.75), 2) if isinstance(rate, (int, float)) else 0.0
+        
+        # StoreCity: casing and whitespaces
+        city = random.choice(CITIES)
+        if random.random() < 0.03:
+            city = city.lower() if random.random() < 0.5 else city.upper()
+        if random.random() < 0.02:
+            city = f" {city}"
 
-def is_holiday(timestamp):
-    # Simple example: treat Sundays as holiday
-    return 1 if timestamp.weekday() == 6 else 0
+        # BillDate: Inconsistent formats
+        invoice_date = fake.date_time_between(start_date="-2y", end_date="now")
+        if random.random() < 0.1:
+            bill_date = invoice_date.strftime("%d-%m-%Y") # Inconsistent format
+        else:
+            bill_date = invoice_date.strftime("%Y-%m-%d %H:%M:%S")
 
+        # POS-Unique Columns
+        payment_modes = ["CASH", "CARD", "UPI", "WALLET"]
+        pay_mode = random.choice(payment_modes)
+        # 2% chance of missing PayMode
+        if random.random() < 0.02: pay_mode = None
+        
+        cashier_id = f"STAFF_{random.randint(101, 150)}"
+        # 1% chance of garbage cashier ID
+        if random.random() < 0.01: cashier_id = "ERR_99"
 
-def generate_discount(category, channel):
-    if category == "Fashion":
-        return round(random.uniform(0.05, 0.30), 2)
-    if channel == "Online":
-        return round(random.uniform(0.00, 0.15), 2)
-    return round(random.uniform(0.00, 0.10), 2)
+        row = {
+            "BillNo": bill_no,
+            "ItemCode": product["ItemCode"],
+            "ProductName": product_name,
+            "Qty": qty,
+            "BillDate": bill_date,
+            "Rate": rate,
+            "LoyaltyID": loyalty_id,
+            "Nation": random.choice(NATIONS),
+            "StoreCity": city,
+            "BuyPrice": buy_price,
+            "StockAtHand": random.randint(0, 500),
+            "PayMode": pay_mode,
+            "CashierID": cashier_id,
+            "ShopTaxRate": random.choice([0.05, 0.12, 0.18])
+        }
+        data.append(row)
 
+    return pd.DataFrame(data)
 
 # ----------------------------
-# ORDER GENERATOR
+# MAIN
 # ----------------------------
-def generate_order():
-    now = datetime.now()
-
-    channel = random.choice(CHANNELS)
-    category = random.choice(CATEGORIES)
-
-    base_quantity = random.randint(1, 3)
-    quantity = calculate_quantity(base_quantity, now, channel)
-
-    price_per_unit = round(random.uniform(100, 5000), 2)
-    discount = generate_discount(category, channel)
-
-    total_amount = round(quantity * price_per_unit * (1 - discount), 2)
-
-    city = random.choice(list(REGIONS.keys()))
-    region = REGIONS[city]
-
-    customer_id = random.choice(CUSTOMER_POOL)  # repeat customers
-
-    # 5% chance of cancellation
-    status = "Completed"
-    if random.random() < 0.05:
-        status = "Cancelled"
-        total_amount = 0
-
-    return {
-        "order_id": random.randint(100000, 999999),
-        "store_id": STORE_ID,
-        "customer_id": customer_id,
-        "customer_city": city,
-        "region": region,
-        "product_category": category,
-        "channel": channel,
-        "quantity": quantity,
-        "price_per_unit": price_per_unit,
-        "discount": discount,
-        "payment_method": random.choice(PAYMENT_METHODS),
-        "holiday_flag": is_holiday(now),
-        "order_status": status,
-        "total_amount": total_amount,
-        "timestamp": now
-    }
-
-
-# ----------------------------
-# STREAM LOOP
-# ----------------------------
-print(f"Starting enhanced live stream for Store {STORE_ID}...")
-
-while True:
-    order = generate_order()
-    df = pd.DataFrame([order])
-
+if __name__ == "__main__":
     # Ensure landing directory exists
     os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
 
-    try:
-        df.to_csv(OUTPUT_FILE, mode="a", header=False, index=False)
-    except FileNotFoundError:
-        df.to_csv(OUTPUT_FILE, mode="w", header=True, index=False)
+    df = generate_messy_pos_data(NUM_ROWS)
+    
+    # Save to CSV
+    df.to_csv(OUTPUT_FILE, index=False)
+    
+    print(f"Successfully generated {len(df)} rows to {OUTPUT_FILE}")
+    print("\nRefined Schema Sample (Synonyms):")
+    print(df.head())
+    
+    print("\nMessiness Check:")
+    print(f"Nulls in LoyaltyID: {df['LoyaltyID'].isnull().sum()}")
+    print(f"Unique Dates Formats: {df['BillDate'].apply(lambda x: '-' in x).value_counts()}")
+    print(f"Garbage strings in Qty: {df[df['Qty'].apply(lambda x: isinstance(x, str))]['Qty'].unique()}")
 
-    print(f"Store {STORE_ID} | New Order:", order)
 
-    time.sleep(random.randint(2, 5))
