@@ -1,63 +1,124 @@
+import os
+import time
+import json
 import subprocess
 import sys
-import os
-import argparse
+from datetime import datetime
 
-def run_script(script_path, args=None, capture_output=False):
-    """Runs a python script as a subprocess."""
-    cmd = [sys.executable, script_path]
-    if args:
-        cmd.extend(args)
-    
-    print(f"\n>>> Running: {' '.join(cmd)}")
+# --- TEMPORAL CONFIGURATION ---
+TEMPORAL_ACCELERATION = 1  # 1 real minute = 1 simulated day (24h)
+STATE_FILE = "data/state.json"
+# ------------------------------
+
+# --- PIPELINE CONFIGURATION ---
+PIPELINE_INTERVAL_LIVE = 60    # Landing -> Bronze -> Silver every 1 real minute
+PIPELINE_INTERVAL_CHUNK = 300  # Silver -> Gold every 5 real minutes
+# ------------------------------
+
+def load_state():
+    """Loads the last recorded virtual time."""
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r") as f:
+                data = json.load(f)
+                return data.get("last_virtual_time", time.time())
+        except:
+            pass
+    return time.time()
+
+def save_state(virtual_time):
+    """Saves the current virtual time to ensure no 'time travel' on restart."""
+    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+    with open(STATE_FILE, "w") as f:
+        json.dump({"last_virtual_time": virtual_time, "updated_at": datetime.now().isoformat()}, f, indent=4)
+
+def run_step(name, script_path, env):
+    """Runs a single pipeline step."""
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Running {name}...")
     try:
-        if capture_output:
-            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-            return result.stdout
-        else:
-            subprocess.run(cmd, check=True)
-            return True
+        subprocess.run([sys.executable, script_path], env=env, check=True)
+        return True
     except subprocess.CalledProcessError as e:
-        print(f"Error running {script_path}: {e}")
-        if capture_output:
-            print(e.stderr)
+        print(f"Error in {name}: {e}")
         return False
 
 def main():
-    parser = argparse.ArgumentParser(description="Medallion Pipeline Orchestrator")
-    parser.add_argument("action", choices=["simulate", "bronze", "silver", "gold", "full-etl"], 
-                        help="Action to perform")
-    parser.add_argument("--store_id", type=str, default="1", help="Store ID for simulation")
+    # 1. Initialize Temporal State
+    virtual_start = load_state()
+    real_start = time.time()
     
-    args = parser.parse_args()
+    print("=" * 60)
+    print("       RETAILSINK MASTER ORCHESTRATION ENGINE")
+    print("=" * 60)
+    print(f"Virtual Start Time : {datetime.fromtimestamp(virtual_start)}")
+    print(f"Acceleration Factor: {TEMPORAL_ACCELERATION}x")
+    print(f"Live Flow Interval : {PIPELINE_INTERVAL_LIVE}s")
+    print(f"Chunk Flow Interval: {PIPELINE_INTERVAL_CHUNK}s")
+    print("-" * 60)
 
-    # Paths to scripts relative to root
-    SIMULATE_SCRIPT = os.path.join("scripts", "data", "simulated_data.py")
-    BRONZE_SCRIPT = os.path.join("scripts", "upgrades", "csv_to_parquet.py")
-    SILVER_SCRIPT = os.path.join("scripts", "upgrades", "bronze_to_silver.py")
-    GOLD_SCRIPT = os.path.join("scripts", "upgrades", "silver_to_gold.py")
+    # Prepare environment for subprocesses
+    env = os.environ.copy()
+    env["SIM_ACCELERATION_FACTOR"] = str(TEMPORAL_ACCELERATION)
+    env["SIM_START_REAL_TIME"] = str(real_start)
+    env["SIM_START_VIRTUAL_TIME"] = str(virtual_start)
+    env["PYTHONPATH"] = os.getcwd()
 
-    if args.action == "simulate":
-        print(f"Starting Data Simulation for Store {args.store_id}...")
-        run_script(SIMULATE_SCRIPT, ["--store_id", args.store_id])
+    # 2. Start Background Services (Simulators & API)
+    services = {
+        "POS Simulator": "core/simulators/pos_simulator.py",
+        "Shipment Simulator": "core/simulators/shipment_simulator.py",
+        "Inventory Simulator": "core/simulators/inventory_simulator.py",
+        "Web Simulator": "core/simulators/web_simulator.py",
+        "FastAPI Server": "api/main.py"
+    }
+    
+    processes = []
+    for name, path in services.items():
+        print(f"Starting {name} background process...")
+        p = subprocess.Popen([sys.executable, path], env=env)
+        processes.append(p)
 
-    elif args.action == "bronze":
-        print("Running Bronze Layer Conversion (Landing -> Bronze Delta)...")
-        run_script(BRONZE_SCRIPT)
+    print("-" * 60)
+    print("Platform is now RUNNING.")
+    print("To start the Dashboard UI, run: cd ui && npm run dev")
+    print("Press Ctrl+C to stop the entire platform.")
+    print("=" * 60)
 
-    elif args.action == "silver":
-        print("Running Silver Layer Conversion (Bronze -> Silver Delta)...")
-        run_script(SILVER_SCRIPT)
+    last_live_run = 0
+    last_chunk_run = 0
 
-    elif args.action == "gold":
-        print("Running Gold Layer Conversion (Silver -> Gold Delta)...")
-        run_script(GOLD_SCRIPT)
+    try:
+        while True:
+            now = time.time()
+            # Calculate current virtual time
+            current_virtual = virtual_start + (now - real_start) * TEMPORAL_ACCELERATION
+            save_state(current_virtual)
 
-    elif args.action == "full-etl":
-        print("Running Full ETL Process (Bronze, Silver & Gold Delta)...")
-        if run_script(BRONZE_SCRIPT):
-            if run_script(SILVER_SCRIPT):
-                run_script(GOLD_SCRIPT)
+            # Check for LIVE flow (Landing -> Silver)
+            if now - last_live_run >= PIPELINE_INTERVAL_LIVE:
+                print(f"\n[{datetime.fromtimestamp(current_virtual).strftime('%Y-%m-%d %H:%M:%S')}] Triggering LIVE Flow...")
+                if run_step("Bronze Layer", "pipeline/bronze_layer.py", env):
+                    run_step("Silver Layer", "pipeline/silver_layer.py", env)
+                last_live_run = now
+
+            # Check for CHUNK flow (Silver -> Gold)
+            if now - last_chunk_run >= PIPELINE_INTERVAL_CHUNK:
+                print(f"\n[{datetime.fromtimestamp(current_virtual).strftime('%Y-%m-%d %H:%M:%S')}] Triggering CHUNK Flow...")
+                run_step("Gold Layer", "pipeline/gold_layer.py", env)
+                last_chunk_run = now
+
+            # Check if any background process died
+            for p in processes:
+                if p.poll() is not None:
+                    print(f"WARNING: One of the background processes died (PID: {p.pid})")
+            
+            time.sleep(2) # State update frequency
+
+    except KeyboardInterrupt:
+        print("\nShutting down RetailSink...")
+        for p in processes:
+            p.terminate()
+        print("Shutdown complete.")
 
 if __name__ == "__main__":
     main()

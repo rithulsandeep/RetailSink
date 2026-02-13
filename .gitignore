@@ -1,4 +1,4 @@
 medallion/*
 landing/*
-dashboard-ui/node_modules/*
+*/node_modules/*
 __pycache__/*

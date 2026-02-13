@@ -139,8 +139,9 @@ def simulate_chunk_ingestion(interval_seconds=120):
         
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Ingested chunk of {num_rows} POS billing records.")
         
-        # Sleep for the interval
-        time.sleep(interval_seconds)
+        # Sleep for the interval (scaled by acceleration factor)
+        factor = float(os.environ.get("SIM_ACCELERATION_FACTOR", 1.0))
+        time.sleep(max(0.1, interval_seconds / factor))
 
 # ----------------------------
 # MAIN

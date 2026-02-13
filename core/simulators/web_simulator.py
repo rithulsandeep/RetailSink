@@ -60,8 +60,9 @@ def simulate_live_ingestion():
         df.to_csv(OUTPUT_FILE, mode='a', header=False, index=False)
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Ingested {num_records} new online retail records.")
         
-        # Sleep for 10-30 seconds
-        time.sleep(random.randint(10, 30))
+        # Sleep for 10-30 seconds (scaled by acceleration factor)
+        factor = float(os.environ.get("SIM_ACCELERATION_FACTOR", 1.0))
+        time.sleep(max(0.1, random.randint(10, 30) / factor))
 
 if __name__ == "__main__":
     os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)

@@ -1,10 +1,17 @@
 import duckdb
 import random
 import os
-from datetime import timedelta
-
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
+
+def get_simulated_now():
+    factor = float(os.environ.get("SIM_ACCELERATION_FACTOR", 1.0))
+    start_real = float(os.environ.get("SIM_START_REAL_TIME", time.time()))
+    start_virtual = float(os.environ.get("SIM_START_VIRTUAL_TIME", start_real))
+    
+    elapsed_real = time.time() - start_real
+    simulated_time = start_virtual + (elapsed_real * factor)
+    return datetime.fromtimestamp(simulated_time)
 
 def simulate_shipment_generation(interval_seconds=60):
     print(f"--- Starting Incremental Shipment Generation (Interval: {interval_seconds}s) ---")
@@ -55,7 +62,8 @@ def simulate_shipment_generation(interval_seconds=60):
 
         if not new_invoices.empty:
             import pandas as pd
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Generating shipments for {len(new_invoices)} new invoices...")
+            sim_now = get_simulated_now()
+            print(f"[{sim_now.strftime('%H:%M:%S')}] Generating shipments for {len(new_invoices)} new invoices...")
             
             cities = ["Mumbai", "Delhi", "Bengaluru", "Hyderabad", "Ahmedabad", "Chennai", "Kolkata", "Surat", "Pune", "Jaipur", "Lucknow", "Kanpur", "Nagpur", "Indore", "Thane", "Bhopal", "Visakhapatnam", "Pimpri-Chinchwad", "Patna", "Vadodara"]
             
@@ -73,7 +81,9 @@ def simulate_shipment_generation(interval_seconds=60):
             new_invoices.to_csv(OUTPUT_PATH, mode='a', index=False, header=header)
             print(f"Successfully added {len(new_invoices)} shipment records.")
             
-        time.sleep(interval_seconds)
+        # Sleep for the interval (scaled by acceleration factor)
+        factor = float(os.environ.get("SIM_ACCELERATION_FACTOR", 1.0))
+        time.sleep(max(0.1, interval_seconds / factor))
 
 if __name__ == "__main__":
     try:

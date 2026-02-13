@@ -116,8 +116,9 @@ def simulate_warehouse_chunk_ingestion(interval_seconds=300):
         
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Ingested chunk of {num_rows} warehouse inventory records.")
         
-        # Sleep for the interval
-        time.sleep(interval_seconds)
+        # Sleep for the interval (scaled by acceleration factor)
+        factor = float(os.environ.get("SIM_ACCELERATION_FACTOR", 1.0))
+        time.sleep(max(0.1, interval_seconds / factor))
 
 # ----------------------------
 # MAIN
