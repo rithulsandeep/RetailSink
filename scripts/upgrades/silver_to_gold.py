@@ -1,109 +1,61 @@
 import duckdb
 import os
-import sys
+import glob
 
-def run_transformation(con, silver_root, gold_root):
-    print(f"--- ELT: Transforming Silver to Gold (Star Schema) ---")
-    
-    # Ensure gold path exists
+def run_gold_transformation(con, silver_root, gold_root):
+    print(f"--- ELT: Transforming Silver to Gold (Unified Star Schema) ---")
     os.makedirs(gold_root, exist_ok=True)
     
-    # Register Silver views
-    pos_silver = os.path.join(silver_root, 'live_sales_data', '**', '*.parquet')
-    erp_silver = os.path.join(silver_root, 'online_retail_II', '**', '*.parquet')
-    
-    # Check if files exist to avoid DuckDB errors
-    import glob
-    if not glob.glob(pos_silver, recursive=True) and not glob.glob(erp_silver, recursive=True):
-        print("No silver data found. Skipping Gold transformation.")
-        return
+    # Paths to Silver Parquet files
+    online_retail = os.path.join(silver_root, 'online_retail', '**', '*.parquet')
+    pos_billing = os.path.join(silver_root, 'pos_billing', '**', '*.parquet')
+    warehouse_logs = os.path.join(silver_root, 'warehouse_logs', '**', '*.parquet')
 
-    # 1. Create dim_product
+    # 1. dim_product (Unified from all silos)
     print("Creating dim_product...")
     con.execute(f"""
         CREATE OR REPLACE TABLE dim_product AS
-        WITH combined_products AS (
-            SELECT DISTINCT 
-                product_category as product_id, 
-                product_category,
-                'Category from POS' as product_description
-            FROM read_parquet('{pos_silver}')
-            UNION
-            SELECT DISTINCT 
-                product_id,
-                'Uncategorized' as product_category,
-                product_description
-            FROM read_parquet('{erp_silver}')
-        )
         SELECT 
             ROW_NUMBER() OVER () as product_key,
             product_id,
-            product_category,
-            product_description
-        FROM combined_products;
+            product_description,
+            source_system
+        FROM (
+            SELECT DISTINCT product_id, product_description, 'ERP' as source_system FROM read_parquet('{online_retail}')
+            UNION
+            SELECT DISTINCT product_id, product_description, 'POS' as source_system FROM read_parquet('{pos_billing}')
+            UNION
+            SELECT DISTINCT product_id, product_name as product_description, 'WMS' as source_system FROM read_parquet('{warehouse_logs}')
+        )
     """)
     con.execute(f"COPY dim_product TO '{os.path.join(gold_root, 'dim_product.parquet')}' (FORMAT PARQUET);")
 
-    # 2. Create dim_customer
+    # 2. dim_customer
     print("Creating dim_customer...")
     con.execute(f"""
         CREATE OR REPLACE TABLE dim_customer AS
-        WITH combined_customers AS (
-            SELECT DISTINCT 
-                customer_id,
-                customer_city,
-                'India' as country
-            FROM read_parquet('{pos_silver}')
-            UNION
-            SELECT DISTINCT 
-                customer_id,
-                'Unknown' as customer_city,
-                country
-            FROM read_parquet('{erp_silver}')
-        )
         SELECT 
             ROW_NUMBER() OVER () as customer_key,
             customer_id,
-            customer_city,
-            country
-        FROM combined_customers;
+            source
+        FROM (
+            SELECT DISTINCT customer_id, 'Online' as source FROM read_parquet('{online_retail}')
+            UNION
+            SELECT DISTINCT customer_id, 'POS' as source FROM read_parquet('{pos_billing}')
+        )
     """)
     con.execute(f"COPY dim_customer TO '{os.path.join(gold_root, 'dim_customer.parquet')}' (FORMAT PARQUET);")
 
-    # 3. Create dim_location
-    print("Creating dim_location...")
-    con.execute(f"""
-        CREATE OR REPLACE TABLE dim_location AS
-        WITH combined_locations AS (
-            SELECT DISTINCT 
-                store_id,
-                region,
-                'India' as country
-            FROM read_parquet('{pos_silver}')
-            UNION
-            SELECT DISTINCT 
-                'Online' as store_id,
-                'Global' as region,
-                country
-            FROM read_parquet('{erp_silver}')
-        )
-        SELECT 
-            ROW_NUMBER() OVER () as location_key,
-            store_id,
-            region,
-            country
-        FROM combined_locations;
-    """)
-    con.execute(f"COPY dim_location TO '{os.path.join(gold_root, 'dim_location.parquet')}' (FORMAT PARQUET);")
-
-    # 4. Create dim_date
+    # 3. dim_date
     print("Creating dim_date...")
     con.execute(f"""
         CREATE OR REPLACE TABLE dim_date AS
         WITH date_spine AS (
-            SELECT DISTINCT timestamp::DATE as full_date FROM read_parquet('{pos_silver}')
+            SELECT DISTINCT order_timestamp::DATE as full_date FROM read_parquet('{online_retail}')
             UNION
-            SELECT DISTINCT order_timestamp::DATE as full_date FROM read_parquet('{erp_silver}')
+            SELECT DISTINCT order_timestamp::DATE as full_date FROM read_parquet('{pos_billing}')
+            UNION
+            SELECT DISTINCT log_timestamp::DATE as full_date FROM read_parquet('{warehouse_logs}')
         )
         SELECT 
             (YEAR(full_date) * 10000 + MONTH(full_date) * 100 + DAY(full_date))::INTEGER as date_key,
@@ -111,71 +63,71 @@ def run_transformation(con, silver_root, gold_root):
             DAY(full_date) as day,
             MONTH(full_date) as month,
             YEAR(full_date) as year,
-            (DAYOFWEEK(full_date) = 0) as is_holiday -- Simple Sunday rule
+            (DAYOFWEEK(full_date) = 0) as is_weekend
         FROM date_spine;
     """)
     con.execute(f"COPY dim_date TO '{os.path.join(gold_root, 'dim_date.parquet')}' (FORMAT PARQUET);")
 
-    # 5. Create fact_sales
+    # 4. fact_sales (Unified Online + POS)
     print("Creating fact_sales...")
     con.execute(f"""
         CREATE OR REPLACE TABLE fact_sales AS
-        WITH pos_facts AS (
-            SELECT 
-                s.order_id,
-                c.customer_key,
-                p.product_key,
-                l.location_key,
-                d.date_key,
-                s.quantity,
-                s.price_per_unit as unit_price,
-                (s.quantity * s.price_per_unit * s.discount) as discount_amount,
-                s.total_amount,
-                s.source_system,
-                s.is_cancelled,
-                d.year,
-                d.month,
-                d.day
-            FROM read_parquet('{pos_silver}') s
-            JOIN dim_customer c ON s.customer_id = c.customer_id
-            JOIN dim_product p ON s.product_category = p.product_id
-            JOIN dim_location l ON s.store_id = l.store_id AND s.region = l.region
-            JOIN dim_date d ON s.timestamp::DATE = d.full_date
-        ),
-        erp_facts AS (
-            SELECT 
-                s.invoice_id as order_id,
-                c.customer_key,
-                p.product_key,
-                l.location_key,
-                d.date_key,
-                s.quantity,
-                s.unit_price,
-                0.0 as discount_amount,
-                s.total_amount,
-                s.source_system,
-                s.is_cancelled,
-                d.year,
-                d.month,
-                d.day
-            FROM read_parquet('{erp_silver}') s
-            JOIN dim_customer c ON s.customer_id = c.customer_id
-            JOIN dim_product p ON s.product_id = p.product_id
-            JOIN dim_location l ON l.store_id = 'Online' AND s.country = l.country
-            JOIN dim_date d ON s.order_timestamp::DATE = d.full_date
+        WITH combined_sales AS (
+            SELECT * FROM read_parquet('{online_retail}')
+            UNION ALL
+            SELECT * FROM read_parquet('{pos_billing}')
         )
         SELECT 
-            MD5(order_id || source_system || COALESCE(product_key::VARCHAR, '')) as sales_key,
-            *
-        FROM (SELECT * FROM pos_facts UNION ALL SELECT * FROM erp_facts);
+            MD5(invoice_id || s.product_id || quantity::VARCHAR || order_timestamp::VARCHAR) as sales_key,
+            invoice_id,
+            customer_key,
+            product_key,
+            date_key,
+            quantity,
+            unit_price,
+            cost_price,
+            total_amount,
+            source_channel,
+            is_cancelled,
+            s.year,
+            s.month,
+            s.day
+        FROM combined_sales s
+        JOIN dim_customer c ON s.customer_id = c.customer_id
+        JOIN dim_product p ON s.product_id = p.product_id
+        JOIN dim_date d ON s.order_timestamp::DATE = d.full_date
     """)
     
-    # Export with partitioning
     fact_sales_path = os.path.join(gold_root, 'fact_sales')
     os.makedirs(fact_sales_path, exist_ok=True)
     con.execute(f"COPY fact_sales TO '{fact_sales_path}' (FORMAT PARQUET, PARTITION_BY (year, month, day), OVERWRITE_OR_IGNORE);")
+
+    # 5. fact_inventory_movement
+    print("Creating fact_inventory_movement...")
+    con.execute(f"""
+        CREATE OR REPLACE TABLE fact_inventory AS
+        SELECT 
+            log_id,
+            product_key,
+            date_key,
+            movement_type,
+            qty_change,
+            warehouse_id,
+            supplier,
+            weight_kg,
+            w.year,
+            w.month,
+            w.day
+        FROM read_parquet('{warehouse_logs}') w
+        JOIN dim_product p ON w.product_id = p.product_id
+        JOIN dim_date d ON w.log_timestamp::DATE = d.full_date
+    """)
     
-    print(f"Successfully created Gold layer tables in {gold_root} (Fact table is partitioned)")
+    fact_inv_path = os.path.join(gold_root, 'fact_inventory')
+    os.makedirs(fact_inv_path, exist_ok=True)
+    con.execute(f"COPY fact_inventory TO '{fact_inv_path}' (FORMAT PARQUET, PARTITION_BY (year, month, day), OVERWRITE_OR_IGNORE);")
+    
+    print(f"Successfully created Gold layer (Unified Star Schema) in {gold_root}")
 
 if __name__ == "__main__":
     SILVER_ROOT = 'medallion/silver'
@@ -183,6 +135,6 @@ if __name__ == "__main__":
     
     con = duckdb.connect()
     try:
-        run_transformation(con, SILVER_ROOT, GOLD_ROOT)
+        run_gold_transformation(con, SILVER_ROOT, GOLD_ROOT)
     finally:
         con.close()

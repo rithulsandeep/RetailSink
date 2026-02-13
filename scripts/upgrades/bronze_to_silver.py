@@ -1,89 +1,100 @@
 import duckdb
 import os
 
-def process_live_sales(con, bronze_path, silver_path):
-    print(f"--- ELT: Processing Live Sales Data (DuckDB) ---")
-    
-    # Ensure silver path parent exists
-    os.makedirs(os.path.dirname(silver_path), exist_ok=True)
-    
-    # SQL Transformation: 
-    # 1. Cast types
-    # 2. Add source_system and is_cancelled
-    # 3. Deduplicate using QUALIFY
-    query = f"""
-    COPY (
-        SELECT 
-            TRIM(order_id)::VARCHAR as order_id,
-            TRIM(store_id)::VARCHAR as store_id,
-            TRIM(customer_id)::VARCHAR as customer_id,
-            TRIM(customer_city) as customer_city,
-            TRIM(region) as region,
-            TRIM(UPPER(product_category)) as product_category,
-            TRIM(UPPER(channel)) as channel,
-            quantity,
-            price_per_unit,
-            discount,
-            TRIM(UPPER(payment_method)) as payment_method,
-            holiday_flag,
-            order_status,
-            total_amount,
-            timestamp,
-            'pos' as source_system,
-            (order_status = 'Cancelled') as is_cancelled,
-            year,
-            month,
-            day
-        FROM read_parquet('{bronze_path}/**/*.parquet')
-        WHERE order_id IS NOT NULL 
-          AND order_id != ''
-          AND quantity > 0
-          AND price_per_unit > 0
-        QUALIFY ROW_NUMBER() OVER(PARTITION BY order_id, product_category, quantity ORDER BY timestamp DESC) = 1
-    ) TO '{silver_path}' (FORMAT PARQUET, PARTITION_BY (year, month, day), OVERWRITE_OR_IGNORE);
-    """
-    con.execute(query)
-    print(f"Successfully transformed Live Sales to {silver_path}")
-
 def process_online_retail(con, bronze_path, silver_path):
-    print(f"--- ELT: Processing Online Retail Data (DuckDB) ---")
-    
+    print(f"--- ELT: Normalizing Online Retail (ERP) ---")
     os.makedirs(os.path.dirname(silver_path), exist_ok=True)
     
-    # SQL Transformation:
-    # 1. Rename columns
-    # 2. Fill missing customer_id
-    # 3. Calculate total_amount
-    # 4. Deduplicate (entire row)
     query = f"""
     COPY (
         SELECT 
-            TRIM(Invoice)::VARCHAR as invoice_id,
+            TRIM(InvoiceNo)::VARCHAR as invoice_id,
             TRIM(UPPER(StockCode))::VARCHAR as product_id,
             COALESCE(NULLIF(TRIM(UPPER(Description)), ''), 'UNKNOWN') as product_description,
-            Quantity as quantity,
+            Quantity::INTEGER as quantity,
             InvoiceDate as order_timestamp,
-            Price as unit_price,
-            COALESCE(NULLIF(TRIM("Customer ID"), ''), 'Unknown') as customer_id,
+            UnitPrice::DOUBLE as unit_price,
+            COALESCE(NULLIF(TRIM(CustomerID::VARCHAR), ''), 'Unknown') as customer_id,
             TRIM(Country) as country,
-            'erp' as source_system,
-            ROUND(Quantity * Price, 2) as total_amount,
+            'Online' as source_channel,
+            ROUND(Quantity::DOUBLE * UnitPrice::DOUBLE, 2) as total_amount,
+            Cost_Price::DOUBLE as cost_price,
             (invoice_id LIKE 'C%') as is_cancelled,
             year,
             month,
             day
         FROM read_parquet('{bronze_path}/**/*.parquet')
-        WHERE Invoice IS NOT NULL 
-          AND Invoice != ''
-          AND StockCode IS NOT NULL 
-          AND StockCode != ''
-          AND Price > 0
-          AND (Quantity > 0 OR (TRIM(Invoice) LIKE 'C%' AND Quantity < 0))
+        WHERE invoice_id IS NOT NULL 
+          AND invoice_id != ''
+          AND TRY_CAST(UnitPrice AS DOUBLE) > 0
         QUALIFY ROW_NUMBER() OVER(PARTITION BY invoice_id, product_id, quantity, order_timestamp) = 1
     ) TO '{silver_path}' (FORMAT PARQUET, PARTITION_BY (year, month, day), OVERWRITE_OR_IGNORE);
     """
     con.execute(query)
-    print(f"Successfully transformed Online Retail to {silver_path}")
+    print(f"Successfully normalized Online Retail to {silver_path}")
+
+def process_pos_billing(con, bronze_path, silver_path):
+    print(f"--- ELT: Normalizing POS Billing (In-Store) ---")
+    os.makedirs(os.path.dirname(silver_path), exist_ok=True)
+    
+    # Mapping POS synonyms back to standard names
+    query = f"""
+    COPY (
+        SELECT 
+            TRIM(BillNo)::VARCHAR as invoice_id,
+            TRIM(UPPER(ItemCode))::VARCHAR as product_id,
+            COALESCE(NULLIF(TRIM(UPPER(ProductName)), ''), 'UNKNOWN') as product_description,
+            TRY_CAST(Qty AS INTEGER) as quantity,
+            BillDate as order_timestamp,
+            TRY_CAST(Rate AS DOUBLE) as unit_price,
+            COALESCE(NULLIF(TRIM(LoyaltyID::VARCHAR), ''), 'Unknown') as customer_id,
+            TRIM(Nation) as country,
+            'Store' as source_channel,
+            ROUND(quantity * unit_price, 2) as total_amount,
+            BuyPrice::DOUBLE as cost_price,
+            (quantity < 0) as is_cancelled,
+            year,
+            month,
+            day
+        FROM read_parquet('{bronze_path}/**/*.parquet')
+        WHERE invoice_id IS NOT NULL 
+          AND invoice_id != ''
+          AND quantity IS NOT NULL
+          AND unit_price IS NOT NULL
+          AND unit_price > 0
+        QUALIFY ROW_NUMBER() OVER(PARTITION BY invoice_id, product_id, quantity, order_timestamp) = 1
+    ) TO '{silver_path}' (FORMAT PARQUET, PARTITION_BY (year, month, day), OVERWRITE_OR_IGNORE);
+    """
+    con.execute(query)
+    print(f"Successfully normalized POS Billing to {silver_path}")
+
+def process_warehouse(con, bronze_path, silver_path):
+    print(f"--- ELT: Normalizing Warehouse Logs ---")
+    os.makedirs(os.path.dirname(silver_path), exist_ok=True)
+    
+    query = f"""
+    COPY (
+        SELECT 
+            LogID as log_id,
+            WarehouseCode as warehouse_id,
+            TRIM(UPPER(SKU_ID)) as product_id,
+            TRIM(UPPER(Item_Name)) as product_name,
+            BatchNo as batch_id,
+            UPPER(TRIM(MovementType)) as movement_type,
+            Quantity_Change::INTEGER as qty_change,
+            EventDate as log_timestamp,
+            SupplierName as supplier,
+            PackageWeight_kg as weight_kg,
+            year,
+            month,
+            day
+        FROM read_parquet('{bronze_path}/**/*.parquet')
+        WHERE product_id IS NOT NULL
+        QUALIFY ROW_NUMBER() OVER(PARTITION BY log_id) = 1
+    ) TO '{silver_path}' (FORMAT PARQUET, PARTITION_BY (year, month, day), OVERWRITE_OR_IGNORE);
+    """
+    con.execute(query)
+    print(f"Successfully normalized Warehouse Logs to {silver_path}")
 
 if __name__ == "__main__":
     BRONZE_ROOT = 'medallion/bronze'
@@ -92,16 +103,22 @@ if __name__ == "__main__":
     con = duckdb.connect()
     
     try:
-        process_live_sales(
-            con,
-            os.path.join(BRONZE_ROOT, 'live_sales_data'),
-            os.path.join(SILVER_ROOT, 'live_sales_data')
-        )
-        
         process_online_retail(
             con,
-            os.path.join(BRONZE_ROOT, 'online_retail_II'),
-            os.path.join(SILVER_ROOT, 'online_retail_II')
+            os.path.join(BRONZE_ROOT, 'Online_retail_data'),
+            os.path.join(SILVER_ROOT, 'online_retail')
+        )
+        
+        process_pos_billing(
+            con,
+            os.path.join(BRONZE_ROOT, 'pos_billing_data'),
+            os.path.join(SILVER_ROOT, 'pos_billing')
+        )
+
+        process_warehouse(
+            con,
+            os.path.join(BRONZE_ROOT, 'warehouse_inventory_data'),
+            os.path.join(SILVER_ROOT, 'warehouse_logs')
         )
     finally:
         con.close()
