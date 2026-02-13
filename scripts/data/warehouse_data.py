@@ -15,6 +15,15 @@ WAREHOUSES = ["WH-MUMBAI-01", "WH-DELHI-02", "WH-BENGALURU-01", "WH-CHENNAI-03",
 SUPPLIERS = ["Bharat Logistics", "India Mart", "Reliant Supply Co.", "Apex Distribution", "Gati Shipments"]
 ORIGINS = ["Mumbai", "Guangzhou", "Hamburg", "New Delhi", "Pune", "Ho Chi Minh City"]
 
+def get_simulated_now():
+    factor = float(os.environ.get("SIM_ACCELERATION_FACTOR", 1.0))
+    start_real = float(os.environ.get("SIM_START_REAL_TIME", time.time()))
+    start_virtual = float(os.environ.get("SIM_START_VIRTUAL_TIME", start_real))
+    
+    elapsed_real = time.time() - start_real
+    simulated_time = start_virtual + (elapsed_real * factor)
+    return datetime.fromtimestamp(simulated_time)
+
 # ----------------------------
 # DATA GENERATOR
 # ----------------------------
@@ -35,6 +44,8 @@ def generate_warehouse_data(num_rows=10000):
 
     print(f"Generating {num_rows} rows of Warehouse Log data...")
 
+    sim_now = get_simulated_now()
+
     for i in range(num_rows):
         product = random.choice(product_pool)
         
@@ -51,8 +62,10 @@ def generate_warehouse_data(num_rows=10000):
         if movement == "INWARD" and random.random() < 0.01:
             qty_affected = -qty_affected
 
-        # Dates
-        arrival_date = fake.date_time_between(start_date="-2y", end_date="now")
+        # Dates: Use simulated now with some jitter
+        jitter = random.randint(0, 3600)
+        arrival_date = sim_now - timedelta(seconds=jitter)
+        
         # Inconsistent warehouse date formatting
         if random.random() < 0.15:
             date_str = arrival_date.strftime("%b %d, %Y") # e.g. Feb 13, 2026
@@ -84,23 +97,35 @@ def generate_warehouse_data(num_rows=10000):
 
     return pd.DataFrame(data)
 
+import time
+
+def simulate_warehouse_chunk_ingestion(interval_seconds=300):
+    print(f"--- Starting Warehouse Inventory Chunk Ingestion to {OUTPUT_FILE} (Interval: {interval_seconds}s) ---")
+    
+    # Ensure landing directory exists
+    os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
+    
+    while True:
+        # Generate a chunk of 20-50 rows
+        num_rows = random.randint(20, 50)
+        df = generate_warehouse_data(num_rows)
+        
+        # Save to CSV (append mode)
+        header = not os.path.exists(OUTPUT_FILE)
+        df.to_csv(OUTPUT_FILE, mode='a', index=False, header=header)
+        
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Ingested chunk of {num_rows} warehouse inventory records.")
+        
+        # Sleep for the interval
+        time.sleep(interval_seconds)
+
 # ----------------------------
 # MAIN
 # ----------------------------
 if __name__ == "__main__":
-    # Ensure landing directory exists
-    os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
-
-    df = generate_warehouse_data(NUM_ROWS)
-    
-    # Save to CSV
-    df.to_csv(OUTPUT_FILE, index=False)
-    
-    print(f"Successfully generated {len(df)} rows to {OUTPUT_FILE}")
-    print("\nWarehouse Silo Schema Sample:")
-    print(df.head())
-    
-    print("\nData silo Quality Check:")
-    print(f"Orphan Logs (Missing SKU_ID): {df['SKU_ID'].isnull().sum()}")
-    print(f"Unique Batch Groups: {df['BatchNo'].nunique()}")
-    print(f"Sample Inconsistent Date (Feb 13, 2026 style): {df[df['EventDate'].str.contains(',')].shape[0]}")
+    try:
+        # Initial generation if file doesn't exist?
+        # Let's just start the loop.
+        simulate_warehouse_chunk_ingestion(1800) # 30 minutes
+    except KeyboardInterrupt:
+        print("\nStopping simulation.")

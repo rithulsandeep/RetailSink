@@ -15,6 +15,15 @@ fake = Faker("en_IN")
 CITIES = ["Mumbai", "Delhi", "Bengaluru", "Hyderabad", "Ahmedabad", "Chennai", "Kolkata", "Pune", "Jaipur", "Lucknow"]
 NATIONS = ["India"]
 
+def get_simulated_now():
+    factor = float(os.environ.get("SIM_ACCELERATION_FACTOR", 1.0))
+    start_real = float(os.environ.get("SIM_START_REAL_TIME", time.time()))
+    start_virtual = float(os.environ.get("SIM_START_VIRTUAL_TIME", start_real))
+    
+    elapsed_real = time.time() - start_real
+    simulated_time = start_virtual + (elapsed_real * factor)
+    return datetime.fromtimestamp(simulated_time)
+
 # ----------------------------
 # DATA GENERATOR
 # ----------------------------
@@ -28,6 +37,8 @@ def generate_messy_pos_data(num_rows=10000):
     ]
 
     print(f"Generating {num_rows} rows of messy POS billing data...")
+
+    sim_now = get_simulated_now()
 
     for i in range(num_rows):
         # 3% chance of multi-item bill (duplicate BillNo)
@@ -70,8 +81,10 @@ def generate_messy_pos_data(num_rows=10000):
         if random.random() < 0.02:
             city = f" {city}"
 
-        # BillDate: Inconsistent formats
-        invoice_date = fake.date_time_between(start_date="-2y", end_date="now")
+        # BillDate: Use simulated now with some jitter (up to 30 mins ago in sim-time)
+        jitter = random.randint(0, 1800)
+        invoice_date = sim_now - timedelta(seconds=jitter)
+        
         if random.random() < 0.1:
             bill_date = invoice_date.strftime("%d-%m-%Y") # Inconsistent format
         else:
@@ -107,25 +120,37 @@ def generate_messy_pos_data(num_rows=10000):
 
     return pd.DataFrame(data)
 
+import time
+
+def simulate_chunk_ingestion(interval_seconds=120):
+    print(f"--- Starting POS Billing Chunk Ingestion to {OUTPUT_FILE} (Interval: {interval_seconds}s) ---")
+    
+    # Ensure landing directory exists
+    os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
+    
+    while True:
+        # Generate a chunk of 50-100 rows
+        num_rows = random.randint(50, 100)
+        df = generate_messy_pos_data(num_rows)
+        
+        # Save to CSV (append mode)
+        header = not os.path.exists(OUTPUT_FILE)
+        df.to_csv(OUTPUT_FILE, mode='a', index=False, header=header)
+        
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Ingested chunk of {num_rows} POS billing records.")
+        
+        # Sleep for the interval
+        time.sleep(interval_seconds)
+
 # ----------------------------
 # MAIN
 # ----------------------------
 if __name__ == "__main__":
-    # Ensure landing directory exists
-    os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
-
-    df = generate_messy_pos_data(NUM_ROWS)
-    
-    # Save to CSV
-    df.to_csv(OUTPUT_FILE, index=False)
-    
-    print(f"Successfully generated {len(df)} rows to {OUTPUT_FILE}")
-    print("\nRefined Schema Sample (Synonyms):")
-    print(df.head())
-    
-    print("\nMessiness Check:")
-    print(f"Nulls in LoyaltyID: {df['LoyaltyID'].isnull().sum()}")
-    print(f"Unique Dates Formats: {df['BillDate'].apply(lambda x: '-' in x).value_counts()}")
-    print(f"Garbage strings in Qty: {df[df['Qty'].apply(lambda x: isinstance(x, str))]['Qty'].unique()}")
+    try:
+        # Initial generation if file doesn't exist? 
+        # Or just start the loop. Let's just start the loop.
+        simulate_chunk_ingestion(600) # 10 minutes
+    except KeyboardInterrupt:
+        print("\nStopping simulation.")
 
 
