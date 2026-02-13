@@ -25,7 +25,7 @@ def run_script(script_path, args=None, capture_output=False):
 
 def main():
     parser = argparse.ArgumentParser(description="Medallion Pipeline Orchestrator")
-    parser.add_argument("action", choices=["simulate", "bronze", "silver", "full-etl"], 
+    parser.add_argument("action", choices=["simulate", "bronze", "silver", "gold", "full-etl"], 
                         help="Action to perform")
     parser.add_argument("--store_id", type=str, default="1", help="Store ID for simulation")
     
@@ -35,23 +35,29 @@ def main():
     SIMULATE_SCRIPT = os.path.join("scripts", "data", "simulated_data.py")
     BRONZE_SCRIPT = os.path.join("scripts", "upgrades", "csv_to_parquet.py")
     SILVER_SCRIPT = os.path.join("scripts", "upgrades", "bronze_to_silver.py")
+    GOLD_SCRIPT = os.path.join("scripts", "upgrades", "silver_to_gold.py")
 
     if args.action == "simulate":
         print(f"Starting Data Simulation for Store {args.store_id}...")
         run_script(SIMULATE_SCRIPT, ["--store_id", args.store_id])
 
     elif args.action == "bronze":
-        print("Running Bronze Layer Conversion (Landing -> Bronze)...")
+        print("Running Bronze Layer Conversion (Landing -> Bronze Delta)...")
         run_script(BRONZE_SCRIPT)
 
     elif args.action == "silver":
-        print("Running Silver Layer Conversion (Bronze -> Silver)...")
+        print("Running Silver Layer Conversion (Bronze -> Silver Delta)...")
         run_script(SILVER_SCRIPT)
 
+    elif args.action == "gold":
+        print("Running Gold Layer Conversion (Silver -> Gold Delta)...")
+        run_script(GOLD_SCRIPT)
+
     elif args.action == "full-etl":
-        print("Running Full ETL Process (Bronze & Silver)...")
+        print("Running Full ETL Process (Bronze, Silver & Gold Delta)...")
         if run_script(BRONZE_SCRIPT):
-            run_script(SILVER_SCRIPT)
+            if run_script(SILVER_SCRIPT):
+                run_script(GOLD_SCRIPT)
 
 if __name__ == "__main__":
     main()

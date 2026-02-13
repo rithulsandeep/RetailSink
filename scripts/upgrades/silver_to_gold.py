@@ -1,27 +1,33 @@
 import duckdb
 import os
-import glob
+import shutil
+from deltalake.writer import write_deltalake
+
+def init_duckdb():
+    con = duckdb.connect()
+    con.execute("INSTALL delta; LOAD delta;")
+    return con
 
 def run_gold_transformation(con, silver_root, gold_root):
-    print(f"--- ELT: Transforming Silver to Gold (Unified Star Schema) ---")
+    print(f"--- ELT: Transforming Silver to Gold (Unified Star Schema) to Delta ---")
     
-    # Clean Gold directory to prevent stale files from inflating row counts
+    # In Delta Lake, we don't necessarily rmtree if we use mode="overwrite" in write_deltalake,
+    # but for a clean start in this migration, clearing the gold_root is fine.
     if os.path.exists(gold_root):
-        import shutil
         print(f"Clearing old Gold layer data in {gold_root}...")
         shutil.rmtree(gold_root)
     os.makedirs(gold_root, exist_ok=True)
     
-    # Paths to Silver Parquet files
-    online_retail = os.path.join(silver_root, 'online_retail', '**', '*.parquet')
-    pos_billing = os.path.join(silver_root, 'pos_billing', '**', '*.parquet')
-    warehouse_logs = os.path.join(silver_root, 'warehouse_logs', '**', '*.parquet')
-    shipments = os.path.join(silver_root, 'shipments', '**', '*.parquet')
+    # Paths to Silver Delta tables (root directories)
+    online_retail = os.path.join(silver_root, 'online_retail')
+    pos_billing = os.path.join(silver_root, 'pos_billing')
+    warehouse_logs = os.path.join(silver_root, 'warehouse_logs')
+    shipments = os.path.join(silver_root, 'shipments')
 
     # 1. dim_product (Truly Unified - unique per product_id)
-    print("Creating dim_product...")
+    print("Creating dim_product (Delta)...")
     con.execute(f"""
-        CREATE OR REPLACE TABLE dim_product AS
+        CREATE OR REPLACE TABLE dim_product_tmp AS
         SELECT 
             ROW_NUMBER() OVER () as product_key,
             product_id,
@@ -30,21 +36,22 @@ def run_gold_transformation(con, silver_root, gold_root):
         FROM (
             SELECT product_id, product_description, source_system
             FROM (
-                SELECT DISTINCT product_id, product_description, 'ERP' as source_system FROM read_parquet('{online_retail}', hive_partitioning=True)
+                SELECT DISTINCT product_id, product_description, 'ERP' as source_system FROM delta_scan('{online_retail}')
                 UNION
-                SELECT DISTINCT product_id, product_description, 'POS' as source_system FROM read_parquet('{pos_billing}', hive_partitioning=True)
+                SELECT DISTINCT product_id, product_description, 'POS' as source_system FROM delta_scan('{pos_billing}')
                 UNION
-                SELECT DISTINCT product_id, product_name as product_description, 'WMS' as source_system FROM read_parquet('{warehouse_logs}', hive_partitioning=True)
+                SELECT DISTINCT product_id, product_name as product_description, 'WMS' as source_system FROM delta_scan('{warehouse_logs}')
             )
             QUALIFY ROW_NUMBER() OVER(PARTITION BY product_id ORDER BY source_system DESC) = 1
         )
     """)
-    con.execute(f"COPY dim_product TO '{os.path.join(gold_root, 'dim_product.parquet')}' (FORMAT PARQUET);")
+    df_prod = con.query("SELECT * FROM dim_product_tmp").to_df()
+    write_deltalake(os.path.join(gold_root, 'dim_product'), df_prod, mode="overwrite")
 
     # 2. dim_customer (Truly Unified - unique per customer_id)
-    print("Creating dim_customer...")
+    print("Creating dim_customer (Delta)...")
     con.execute(f"""
-        CREATE OR REPLACE TABLE dim_customer AS
+        CREATE OR REPLACE TABLE dim_customer_tmp AS
         SELECT 
             ROW_NUMBER() OVER () as customer_key,
             customer_id,
@@ -52,9 +59,9 @@ def run_gold_transformation(con, silver_root, gold_root):
         FROM (
             SELECT customer_id, source
             FROM (
-                SELECT DISTINCT customer_id, 'Online' as source FROM read_parquet('{online_retail}', hive_partitioning=True)
+                SELECT DISTINCT customer_id, 'Online' as source FROM delta_scan('{online_retail}')
                 UNION
-                SELECT DISTINCT customer_id, 'POS' as source FROM read_parquet('{pos_billing}', hive_partitioning=True)
+                SELECT DISTINCT customer_id, 'POS' as source FROM delta_scan('{pos_billing}')
             )
             WHERE customer_id IS NOT NULL AND customer_id != 'Unknown'
             QUALIFY ROW_NUMBER() OVER(PARTITION BY customer_id ORDER BY source) = 1
@@ -64,20 +71,21 @@ def run_gold_transformation(con, silver_root, gold_root):
             SELECT 'Unknown' as customer_id, 'SYSTEM' as source
         )
     """)
-    con.execute(f"COPY dim_customer TO '{os.path.join(gold_root, 'dim_customer.parquet')}' (FORMAT PARQUET);")
+    df_cust = con.query("SELECT * FROM dim_customer_tmp").to_df()
+    write_deltalake(os.path.join(gold_root, 'dim_customer'), df_cust, mode="overwrite")
 
     # 3. dim_date
-    print("Creating dim_date...")
+    print("Creating dim_date (Delta)...")
     con.execute(f"""
-        CREATE OR REPLACE TABLE dim_date AS
+        CREATE OR REPLACE TABLE dim_date_tmp AS
         WITH date_spine AS (
-            SELECT DISTINCT order_timestamp::DATE as full_date FROM read_parquet('{online_retail}', hive_partitioning=True)
+            SELECT DISTINCT order_timestamp::DATE as full_date FROM delta_scan('{online_retail}')
             UNION
-            SELECT DISTINCT order_timestamp::DATE as full_date FROM read_parquet('{pos_billing}', hive_partitioning=True)
+            SELECT DISTINCT order_timestamp::DATE as full_date FROM delta_scan('{pos_billing}')
             UNION
-            SELECT DISTINCT log_timestamp::DATE as full_date FROM read_parquet('{warehouse_logs}', hive_partitioning=True)
+            SELECT DISTINCT log_timestamp::DATE as full_date FROM delta_scan('{warehouse_logs}')
             UNION
-            SELECT DISTINCT ship_timestamp::DATE as full_date FROM read_parquet('{shipments}', hive_partitioning=True)
+            SELECT DISTINCT ship_timestamp::DATE as full_date FROM delta_scan('{shipments}')
         )
         SELECT 
             (YEAR(full_date) * 10000 + MONTH(full_date) * 100 + DAY(full_date))::INTEGER as date_key,
@@ -88,28 +96,33 @@ def run_gold_transformation(con, silver_root, gold_root):
             (DAYOFWEEK(full_date) = 0) as is_weekend
         FROM date_spine;
     """)
-    con.execute(f"COPY dim_date TO '{os.path.join(gold_root, 'dim_date.parquet')}' (FORMAT PARQUET);")
+    df_date = con.query("SELECT * FROM dim_date_tmp").to_df()
+    write_deltalake(os.path.join(gold_root, 'dim_date'), df_date, mode="overwrite")
 
     # 4. fact_sales (Unified Online + POS with City)
-    print("Creating fact_sales...")
+    print("Creating fact_sales (Delta)...")
     
     con.execute(f"""
-        CREATE OR REPLACE TABLE fact_sales AS
+        CREATE OR REPLACE TABLE fact_sales_tmp AS
         WITH combined_sales AS (
             SELECT 
-                REGEXP_REPLACE(invoice_id, '^C', '', 'i') as invoice_id,
+                REGEXP_REPLACE(invoice_id, '^C', '', 'i') as invoice_id_new,
                 * EXCLUDE (invoice_id)
-            FROM read_parquet(['{online_retail}', '{pos_billing}'], hive_partitioning=True, union_by_name=True)
+            FROM (
+                SELECT * FROM delta_scan('{online_retail}')
+                UNION ALL BY NAME
+                SELECT * FROM delta_scan('{pos_billing}')
+            )
         ),
         shipment_lookup AS (
             SELECT 
-                REGEXP_REPLACE(invoice_id, '^C', '', 'i') as invoice_id, 
+                REGEXP_REPLACE(invoice_id, '^C', '', 'i') as invoice_id_new, 
                 city 
-            FROM read_parquet('{shipments}', hive_partitioning=True)
+            FROM delta_scan('{shipments}')
         )
         SELECT 
-            MD5(s.invoice_id || s.product_id || quantity::VARCHAR || order_timestamp::VARCHAR) as sales_key,
-            s.invoice_id,
+            MD5(s.invoice_id_new || s.product_id || quantity::VARCHAR || order_timestamp::VARCHAR) as sales_key,
+            s.invoice_id_new as invoice_id,
             customer_key,
             product_key,
             date_key,
@@ -124,20 +137,19 @@ def run_gold_transformation(con, silver_root, gold_root):
             s.month,
             s.day
         FROM combined_sales s
-        LEFT JOIN shipment_lookup sh ON s.invoice_id = sh.invoice_id
-        JOIN dim_customer c ON s.customer_id = c.customer_id
-        JOIN dim_product p ON s.product_id = p.product_id
-        JOIN dim_date d ON TRY_CAST(s.order_timestamp AS DATE) = d.full_date
+        LEFT JOIN shipment_lookup sh ON s.invoice_id_new = sh.invoice_id_new
+        JOIN dim_customer_tmp c ON s.customer_id = c.customer_id
+        JOIN dim_product_tmp p ON s.product_id = p.product_id
+        JOIN dim_date_tmp d ON TRY_CAST(s.order_timestamp AS DATE) = d.full_date
     """)
     
-    fact_sales_path = os.path.join(gold_root, 'fact_sales')
-    os.makedirs(fact_sales_path, exist_ok=True)
-    con.execute(f"COPY fact_sales TO '{fact_sales_path}' (FORMAT PARQUET, PARTITION_BY (year, month, day), OVERWRITE_OR_IGNORE);")
+    df_sales = con.query("SELECT * FROM fact_sales_tmp").to_df()
+    write_deltalake(os.path.join(gold_root, 'fact_sales'), df_sales, mode="overwrite", partition_by=["year", "month", "day"])
 
     # 5. fact_inventory_movement
-    print("Creating fact_inventory_movement...")
+    print("Creating fact_inventory (Delta)...")
     con.execute(f"""
-        CREATE OR REPLACE TABLE fact_inventory AS
+        CREATE OR REPLACE TABLE fact_inventory_tmp AS
         SELECT 
             log_id,
             product_key,
@@ -150,19 +162,17 @@ def run_gold_transformation(con, silver_root, gold_root):
             w.year,
             w.month,
             w.day
-        FROM read_parquet('{warehouse_logs}', hive_partitioning=True) w
-        JOIN dim_product p ON w.product_id = p.product_id
-        JOIN dim_date d ON w.log_timestamp::DATE = d.full_date
+        FROM delta_scan('{warehouse_logs}') w
+        JOIN dim_product_tmp p ON w.product_id = p.product_id
+        JOIN dim_date_tmp d ON w.log_timestamp::DATE = d.full_date
     """)
-    
-    fact_inv_path = os.path.join(gold_root, 'fact_inventory')
-    os.makedirs(fact_inv_path, exist_ok=True)
-    con.execute(f"COPY fact_inventory TO '{fact_inv_path}' (FORMAT PARQUET, PARTITION_BY (year, month, day), OVERWRITE_OR_IGNORE);")
+    df_inv = con.query("SELECT * FROM fact_inventory_tmp").to_df()
+    write_deltalake(os.path.join(gold_root, 'fact_inventory'), df_inv, mode="overwrite", partition_by=["year", "month", "day"])
     
     # 6. fact_shipments
-    print("Creating fact_shipments...")
+    print("Creating fact_shipments (Delta)...")
     con.execute(f"""
-        CREATE OR REPLACE TABLE fact_shipments AS
+        CREATE OR REPLACE TABLE fact_shipments_tmp AS
         SELECT 
             REGEXP_REPLACE(sh.invoice_id, '^C', '', 'i') as invoice_id,
             TRY_CAST(sh.ship_timestamp AS TIMESTAMP) as ship_timestamp,
@@ -173,20 +183,18 @@ def run_gold_transformation(con, silver_root, gold_root):
             sh.year,
             sh.month,
             sh.day
-        FROM read_parquet('{shipments}', hive_partitioning=True) sh
+        FROM delta_scan('{shipments}') sh
     """)
+    df_ship = con.query("SELECT * FROM fact_shipments_tmp").to_df()
+    write_deltalake(os.path.join(gold_root, 'fact_shipments'), df_ship, mode="overwrite", partition_by=["year", "month", "day"])
     
-    fact_ship_path = os.path.join(gold_root, 'fact_shipments')
-    os.makedirs(fact_ship_path, exist_ok=True)
-    con.execute(f"COPY fact_shipments TO '{fact_ship_path}' (FORMAT PARQUET, PARTITION_BY (year, month, day), OVERWRITE_OR_IGNORE);")
-    
-    print(f"Successfully created Gold layer (Unified Star Schema) in {gold_root}")
+    print(f"Successfully created Gold layer (Unified Star Schema) in Delta Lake format at {gold_root}")
 
 if __name__ == "__main__":
     SILVER_ROOT = 'medallion/silver'
     GOLD_ROOT = 'medallion/gold'
     
-    con = duckdb.connect()
+    con = init_duckdb()
     try:
         run_gold_transformation(con, SILVER_ROOT, GOLD_ROOT)
     finally:

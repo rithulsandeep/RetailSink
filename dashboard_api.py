@@ -16,15 +16,17 @@ app.add_middleware(
 )
 
 # Paths to Gold layer data
-FACT_SALES = "medallion/gold/fact_sales/**/*.parquet"
-FACT_INVENTORY = "medallion/gold/fact_inventory/**/*.parquet"
-FACT_SHIPMENTS = "medallion/gold/fact_shipments/**/*.parquet"
-DIM_PRODUCT = "medallion/gold/dim_product.parquet"
-DIM_CUSTOMER = "medallion/gold/dim_customer.parquet"
-DIM_DATE = "medallion/gold/dim_date.parquet"
+FACT_SALES = "medallion/gold/fact_sales"
+FACT_INVENTORY = "medallion/gold/fact_inventory"
+FACT_SHIPMENTS = "medallion/gold/fact_shipments"
+DIM_PRODUCT = "medallion/gold/dim_product"
+DIM_CUSTOMER = "medallion/gold/dim_customer"
+DIM_DATE = "medallion/gold/dim_date"
 
 def get_db():
-    return duckdb.connect()
+    con = duckdb.connect()
+    con.execute("INSTALL delta; LOAD delta;")
+    return con
 
 @app.get("/api/kpi/summary")
 def get_summary_kpis():
@@ -36,7 +38,7 @@ def get_summary_kpis():
         SUM(total_amount) as total_revenue,
         COUNT(DISTINCT invoice_id) as total_orders,
         COUNT(DISTINCT customer_key) as total_customers
-    FROM read_parquet('{FACT_SALES}', hive_partitioning = true)
+    FROM delta_scan('{FACT_SALES}')
     """
     res = db.query(query).to_df().to_dict(orient='records')[0]
     return res
@@ -54,7 +56,7 @@ def get_revenue_trend(period: str = "month"):
         {group_col}, 
         year,
         SUM(total_amount) as revenue
-    FROM read_parquet('{FACT_SALES}', hive_partitioning = true)
+    FROM delta_scan('{FACT_SALES}')
     GROUP BY {group_col}, year
     ORDER BY year DESC, {group_col} DESC
     LIMIT 12
@@ -72,8 +74,8 @@ def get_top_products(limit: int = 5):
         p.product_description,
         SUM(s.quantity) as total_quantity,
         SUM(s.total_amount) as total_revenue
-    FROM read_parquet('{FACT_SALES}', hive_partitioning = true) s
-    JOIN read_parquet('{DIM_PRODUCT}') p ON s.product_key = p.product_key
+    FROM delta_scan('{FACT_SALES}') s
+    JOIN delta_scan('{DIM_PRODUCT}') p ON s.product_key = p.product_key
     GROUP BY p.product_description
     ORDER BY total_revenue DESC
     LIMIT {limit}
@@ -87,7 +89,7 @@ def get_city_sales():
     SELECT 
         city,
         SUM(total_amount) as revenue
-    FROM read_parquet('{FACT_SALES}', hive_partitioning = true)
+    FROM delta_scan('{FACT_SALES}')
     GROUP BY city
     ORDER BY revenue DESC
     LIMIT 10
@@ -99,22 +101,22 @@ def get_operations_metrics():
     db = get_db()
     
     # 1. Avg Delivery Time
-    delivery_query = f"SELECT AVG(delivery_days) as avg_delivery_days FROM read_parquet('{FACT_SHIPMENTS}', hive_partitioning = true)"
+    delivery_query = f"SELECT AVG(delivery_days) as avg_delivery_days FROM delta_scan('{FACT_SHIPMENTS}')"
     avg_delivery = db.query(delivery_query).to_df().iloc[0,0]
     
     # 2. Inventory Turnover (Simplified: Total Revenue / Total Qty Change)
     turnover_query = f"""
     SELECT 
-        (SELECT SUM(total_amount) FROM read_parquet('{FACT_SALES}', hive_partitioning = true)) / 
+        (SELECT SUM(total_amount) FROM delta_scan('{FACT_SALES}')) / 
         COALESCE(NULLIF(SUM(ABS(qty_change)), 0), 1) as turnover_ratio
-    FROM read_parquet('{FACT_INVENTORY}', hive_partitioning = true)
+    FROM delta_scan('{FACT_INVENTORY}')
     """
     turnover = db.query(turnover_query).to_df().iloc[0,0]
     
     # 3. Seasonal Demand (Revenue by Month)
     seasonal_query = f"""
     SELECT month, SUM(total_amount) as revenue 
-    FROM read_parquet('{FACT_SALES}', hive_partitioning = true)
+    FROM delta_scan('{FACT_SALES}')
     GROUP BY month ORDER BY month
     """
     seasonal = db.query(seasonal_query).to_df().to_dict(orient='records')
@@ -133,7 +135,7 @@ def get_customer_insights():
     retention_query = f"""
     WITH cust_orders AS (
         SELECT customer_key, COUNT(DISTINCT invoice_id) as order_count
-        FROM read_parquet('{FACT_SALES}', hive_partitioning = true)
+        FROM delta_scan('{FACT_SALES}')
         GROUP BY customer_key
     )
     SELECT 
@@ -149,7 +151,7 @@ def get_customer_insights():
     SELECT AVG(customer_revenue) as clv
     FROM (
         SELECT customer_key, SUM(total_amount) as customer_revenue
-        FROM read_parquet('{FACT_SALES}', hive_partitioning = true)
+        FROM delta_scan('{FACT_SALES}')
         GROUP BY customer_key
     )
     """
@@ -159,18 +161,18 @@ def get_customer_insights():
     basket_query = f"""
     WITH target_invoices AS (
         SELECT DISTINCT invoice_id 
-        FROM read_parquet('{FACT_SALES}', hive_partitioning = true)
+        FROM delta_scan('{FACT_SALES}')
         LIMIT 2000
     )
     SELECT 
         p1.product_description as item_a,
         p2.product_description as item_b,
         COUNT(*) as frequency
-    FROM read_parquet('{FACT_SALES}', hive_partitioning = true) s1
+    FROM delta_scan('{FACT_SALES}') s1
     JOIN target_invoices t ON s1.invoice_id = t.invoice_id
-    JOIN read_parquet('{FACT_SALES}', hive_partitioning = true) s2 ON s1.invoice_id = s2.invoice_id AND s1.product_key < s2.product_key
-    JOIN read_parquet('{DIM_PRODUCT}') p1 ON s1.product_key = p1.product_key
-    JOIN read_parquet('{DIM_PRODUCT}') p2 ON s2.product_key = p2.product_key
+    JOIN delta_scan('{FACT_SALES}') s2 ON s1.invoice_id = s2.invoice_id AND s1.product_key < s2.product_key
+    JOIN delta_scan('{DIM_PRODUCT}') p1 ON s1.product_key = p1.product_key
+    JOIN delta_scan('{DIM_PRODUCT}') p2 ON s2.product_key = p2.product_key
     GROUP BY item_a, item_b
     ORDER BY frequency DESC
     LIMIT 5
@@ -190,7 +192,7 @@ def get_sales_channel_distribution():
     SELECT 
         source_channel,
         SUM(total_amount) as revenue
-    FROM read_parquet('{FACT_SALES}', hive_partitioning = true)
+    FROM delta_scan('{FACT_SALES}')
     GROUP BY source_channel
     """
     return db.query(query).to_df().to_dict(orient='records')
@@ -202,8 +204,8 @@ def get_inventory_status():
     SELECT 
         p.product_description,
         SUM(i.qty_change) as current_stock
-    FROM read_parquet('{FACT_INVENTORY}', hive_partitioning = true) i
-    JOIN read_parquet('{DIM_PRODUCT}') p ON i.product_key = p.product_key
+    FROM delta_scan('{FACT_INVENTORY}') i
+    JOIN delta_scan('{DIM_PRODUCT}') p ON i.product_key = p.product_key
     GROUP BY p.product_description
     HAVING current_stock > 0
     ORDER BY current_stock DESC
@@ -233,7 +235,7 @@ def get_lineage_stats():
             except Exception as e:
                 print(f"Error counting {path}: {e}")
 
-    # 2. Bronze
+    # 2. Bronze (Delta)
     bronze_paths = {
         "Online Retail (Bronze)": "medallion/bronze/Online_retail_data",
         "POS Billing (Bronze)": "medallion/bronze/pos_billing_data",
@@ -242,10 +244,13 @@ def get_lineage_stats():
     }
     for name, path in bronze_paths.items():
         if os.path.exists(path):
-            count = db.execute(f"SELECT COUNT(*) FROM read_parquet('{path}/**/*.parquet')").fetchone()[0]
-            stats.append({"layer": "Bronze", "name": name, "count": count})
+            try:
+                count = db.execute(f"SELECT COUNT(*) FROM delta_scan('{path}')").fetchone()[0]
+                stats.append({"layer": "Bronze", "name": name, "count": count})
+            except:
+                pass
 
-    # 3. Silver
+    # 3. Silver (Delta)
     silver_paths = {
         "Online Retail (Silver)": "medallion/silver/online_retail",
         "POS Billing (Silver)": "medallion/silver/pos_billing",
@@ -254,10 +259,13 @@ def get_lineage_stats():
     }
     for name, path in silver_paths.items():
         if os.path.exists(path):
-            count = db.execute(f"SELECT COUNT(*) FROM read_parquet('{path}/**/*.parquet')").fetchone()[0]
-            stats.append({"layer": "Silver", "name": name, "count": count})
+            try:
+                count = db.execute(f"SELECT COUNT(*) FROM delta_scan('{path}')").fetchone()[0]
+                stats.append({"layer": "Silver", "name": name, "count": count})
+            except:
+                pass
 
-    # 4. Gold
+    # 4. Gold (Delta)
     gold_entities = {
         "dim_product": DIM_PRODUCT,
         "dim_customer": DIM_CUSTOMER,
@@ -267,11 +275,12 @@ def get_lineage_stats():
         "fact_shipments": FACT_SHIPMENTS
     }
     for name, path in gold_entities.items():
-        try:
-            count = db.execute(f"SELECT COUNT(*) FROM read_parquet('{path}')").fetchone()[0]
-            stats.append({"layer": "Gold", "name": name, "count": count})
-        except:
-            pass
+        if os.path.exists(path):
+            try:
+                count = db.execute(f"SELECT COUNT(*) FROM delta_scan('{path}')").fetchone()[0]
+                stats.append({"layer": "Gold", "name": name, "count": count})
+            except:
+                pass
 
     return stats
 

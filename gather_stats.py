@@ -6,6 +6,7 @@ import json
 
 def get_row_counts():
     con = duckdb.connect()
+    con.execute("INSTALL delta; LOAD delta;")
     stats = []
 
     # Landing (CSV/XLSX)
@@ -22,7 +23,7 @@ def get_row_counts():
             except:
                 pass
 
-    # Bronze (Parquet)
+    # Bronze (Delta)
     bronze_dirs = [
         ('medallion/bronze/Online_retail_data', 'Online Retail (Bronze)'),
         ('medallion/bronze/pos_billing_data', 'POS Billing (Bronze)'),
@@ -30,10 +31,13 @@ def get_row_counts():
     ]
     for path, name in bronze_dirs:
         if os.path.exists(path):
-            count = con.execute(f"SELECT COUNT(*) FROM read_parquet('{path}/**/*.parquet')").fetchone()[0]
-            stats.append({'layer': 'Bronze', 'name': name, 'count': count})
+            try:
+                count = con.execute(f"SELECT COUNT(*) FROM delta_scan('{path}')").fetchone()[0]
+                stats.append({'layer': 'Bronze', 'name': name, 'count': count})
+            except:
+                pass
 
-    # Silver (Parquet)
+    # Silver (Delta)
     silver_dirs = [
         ('medallion/silver/online_retail', 'Online Retail (Silver)'),
         ('medallion/silver/pos_billing', 'POS Billing (Silver)'),
@@ -41,22 +45,27 @@ def get_row_counts():
     ]
     for path, name in silver_dirs:
         if os.path.exists(path):
-            count = con.execute(f"SELECT COUNT(*) FROM read_parquet('{path}/**/*.parquet')").fetchone()[0]
-            stats.append({'layer': 'Silver', 'name': name, 'count': count})
+            try:
+                count = con.execute(f"SELECT COUNT(*) FROM delta_scan('{path}')").fetchone()[0]
+                stats.append({'layer': 'Silver', 'name': name, 'count': count})
+            except:
+                pass
 
-    # Gold (Parquet)
-    gold_files = [
-        ('medallion/gold/dim_product.parquet', 'dim_product (Gold)'),
-        ('medallion/gold/dim_customer.parquet', 'dim_customer (Gold)'),
-        ('medallion/gold/dim_date.parquet', 'dim_date (Gold)'),
-        ('medallion/gold/fact_sales/**/*.parquet', 'fact_sales (Gold)'),
-        ('medallion/gold/fact_inventory/**/*.parquet', 'fact_inventory (Gold)')
+    # Gold (Delta)
+    gold_dirs = [
+        ('medallion/gold/dim_product', 'dim_product (Gold)'),
+        ('medallion/gold/dim_customer', 'dim_customer (Gold)'),
+        ('medallion/gold/dim_date', 'dim_date (Gold)'),
+        ('medallion/gold/fact_sales', 'fact_sales (Gold)'),
+        ('medallion/gold/fact_inventory', 'fact_inventory (Gold)')
     ]
-    for path, name in gold_files:
-        files = glob.glob(path, recursive=True)
-        if files:
-            count = con.execute(f"SELECT COUNT(*) FROM read_parquet({files})").fetchone()[0]
-            stats.append({'layer': 'Gold', 'name': name, 'count': count})
+    for path, name in gold_dirs:
+        if os.path.exists(path):
+            try:
+                count = con.execute(f"SELECT COUNT(*) FROM delta_scan('{path}')").fetchone()[0]
+                stats.append({'layer': 'Gold', 'name': name, 'count': count})
+            except:
+                pass
 
     con.close()
     return stats

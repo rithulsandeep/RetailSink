@@ -50,15 +50,16 @@ def process_file(file_path, output_root, timestamp_col, custom_headers=None):
         # Ensure output directory exists
         os.makedirs(output_dir, exist_ok=True)
 
-        print(f"Partitioning and saving to {output_dir}...")
-        df.to_parquet(
-            output_dir, 
-            engine='pyarrow', 
-            compression='snappy', 
-            index=False, 
-            partition_cols=['year', 'month', 'day']
+        print(f"Partitioning and saving to {output_dir} (Delta Lake format)...")
+        from deltalake.writer import write_deltalake
+        
+        write_deltalake(
+            output_dir,
+            df,
+            mode="overwrite",
+            partition_by=["year", "month", "day"]
         )
-        print(f"Successfully processed {file_name} into partitioned Parquet.")
+        print(f"Successfully processed {file_name} into Delta Lake table.")
         
     except Exception as e:
         print(f"An error occurred processing {file_path}: {e}")
