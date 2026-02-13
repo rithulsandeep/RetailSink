@@ -5,7 +5,7 @@ import pandas as pd
 import json
 import os
 
-app = FastAPI(title="Retail Analytics API")
+app = FastAPI(title="RetailSink Analytics API")
 
 # Enable CORS for frontend integration
 app.add_middleware(
