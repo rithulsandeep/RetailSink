@@ -188,6 +188,19 @@ def run_gold_transformation(con, silver_root, gold_root):
     df_ship = con.query("SELECT * FROM fact_shipments_tmp").to_df()
     write_deltalake(os.path.join(gold_root, 'fact_shipments'), df_ship, mode="overwrite", partition_by=["year", "month", "day"])
     
+    # 7. KPI Summary (Pre-calculated for Dashboard Performance)
+    print("Creating kpi_summary (Delta)...")
+    con.execute(f"""
+        CREATE OR REPLACE TABLE kpi_summary_tmp AS
+        SELECT 
+            SUM(total_amount) as total_revenue,
+            COUNT(DISTINCT invoice_id) as total_orders,
+            COUNT(DISTINCT customer_key) as total_customers
+        FROM fact_sales_tmp
+    """)
+    df_kpi = con.query("SELECT * FROM kpi_summary_tmp").to_df()
+    write_deltalake(os.path.join(gold_root, 'kpi_summary'), df_kpi, mode="overwrite")
+
     print(f"Successfully created Gold layer (Unified Star Schema) in Delta Lake format at {gold_root}")
 
 if __name__ == "__main__":
