@@ -1,35 +1,66 @@
 import duckdb
 import os
 import shutil
-from deltalake.writer import write_deltalake
+from deltalake import DeltaTable, write_deltalake
 
 def init_duckdb():
     con = duckdb.connect()
     con.execute("INSTALL delta; LOAD delta;")
     return con
 
+def merge_to_gold(con, gold_path, df, unique_keys, partition_cols=None):
+    """
+    Merges data into Gold Delta table.
+    """
+    if df.empty:
+        print("No data to merge.")
+        return
+
+    if not os.path.exists(gold_path):
+        print(f"Creating new Gold table at {gold_path}")
+        try:
+            write_deltalake(gold_path, df, mode="overwrite", partition_by=partition_cols)
+        except Exception as e:
+            print(f"Error creating Gold table {gold_path}: {e}")
+    else:
+        print(f"Merging into existing Gold table at {gold_path}")
+        try:
+            dt = DeltaTable(gold_path)
+            predicate = " AND ".join([f"s.{k} = t.{k}" for k in unique_keys])
+            (
+                dt.merge(
+                    source=df,
+                    predicate=predicate,
+                    source_alias="s",
+                    target_alias="t"
+                )
+                .when_matched_update_all()
+                .when_not_matched_insert_all()
+                .execute()
+            )
+        except Exception as e:
+            print(f"Error merging into Gold table {gold_path}: {e}")
+            # Fallback if complex merge fails? No, better to fail and log.
+
 def run_gold_transformation(con, silver_root, gold_root):
     print(f"--- ELT: Transforming Silver to Gold (Unified Star Schema) to Delta ---")
     
-    # In Delta Lake, we don't necessarily rmtree if we use mode="overwrite" in write_deltalake,
-    # but for a clean start in this migration, clearing the gold_root is fine.
-    if os.path.exists(gold_root):
-        print(f"Clearing old Gold layer data in {gold_root}...")
-        shutil.rmtree(gold_root)
     os.makedirs(gold_root, exist_ok=True)
     
-    # Paths to Silver Delta tables (root directories)
+    # Paths to Silver Delta tables
     online_retail = os.path.join(silver_root, 'online_retail')
     pos_billing = os.path.join(silver_root, 'pos_billing')
     warehouse_logs = os.path.join(silver_root, 'warehouse_logs')
     shipments = os.path.join(silver_root, 'shipments')
 
-    # 1. dim_product (Truly Unified - unique per product_id)
-    print("Creating dim_product (Delta)...")
+    # 1. dim_product (Unified)
+    # We re-scan Silver because Products can be updated/added anytime.
+    # Ideally we should only scan changed files, but for Dimension tables, full scan of distincts is relatively fast.
+    print("Updating dim_product (Delta)...")
     con.execute(f"""
         CREATE OR REPLACE TABLE dim_product_tmp AS
         SELECT 
-            ROW_NUMBER() OVER () as product_key,
+            CAST((hash(product_id) & 9223372036854775807) AS BIGINT) as product_key,
             product_id,
             product_description,
             source_system
@@ -45,11 +76,13 @@ def run_gold_transformation(con, silver_root, gold_root):
             QUALIFY ROW_NUMBER() OVER(PARTITION BY product_id ORDER BY source_system DESC) = 1
         )
     """)
+    
     df_prod = con.query("SELECT * FROM dim_product_tmp").to_df()
-    write_deltalake(os.path.join(gold_root, 'dim_product'), df_prod, mode="overwrite")
+    merge_to_gold(con, os.path.join(gold_root, 'dim_product'), df_prod, unique_keys=["product_id"])
 
-    # 2. dim_customer (SCD Type 2 - tracking address changes)
-    print("Creating dim_customer (Delta - SCD Type 2)...")
+    # 2. dim_customer (SCD Type 2)
+    # Similar issue with `customer_key`. Use Hash.
+    print("Updating dim_customer (Delta - SCD Type 2)...")
     con.execute(f"""
         CREATE OR REPLACE TABLE dim_customer_tmp AS
         WITH raw_customers AS (
@@ -76,50 +109,38 @@ def run_gold_transformation(con, silver_root, gold_root):
         ),
         versions AS (
             SELECT 
+                CAST((hash(customer_id || valid_from::VARCHAR) & 9223372036854775807) AS BIGINT) as customer_key,
                 customer_id, city, country, source,
                 valid_from,
                 LEAD(valid_from) OVER (PARTITION BY customer_id ORDER BY valid_from) as valid_to,
                 (LEAD(valid_from) OVER (PARTITION BY customer_id ORDER BY valid_from) IS NULL) as is_current
             FROM version_starts
         )
-        SELECT 
-            ROW_NUMBER() OVER () as customer_key,
-            customer_id,
-            city,
-            country,
-            source,
-            valid_from,
-            valid_to,
-            is_current
-        FROM versions
-        
+        SELECT * FROM versions
         UNION ALL
-        -- Ensure 'Unknown' remains in the dimension
         SELECT 
-            0 as customer_key, 
-            'Unknown' as customer_id, 
-            'Unknown' as city, 
-            'Unknown' as country, 
-            'SYSTEM' as source,
-            '1900-01-01'::TIMESTAMP as valid_from, 
-            NULL::TIMESTAMP as valid_to, 
-            true as is_current
+            0 as customer_key, 'Unknown', 'Unknown', 'Unknown', 'SYSTEM', '1900-01-01'::TIMESTAMP, NULL::TIMESTAMP, true
     """)
     df_cust = con.query("SELECT * FROM dim_customer_tmp").to_df()
+    
+    # SCD 2 Logic usually requires careful handling.
+    # For simplicity in this "Incremental" step, we can Overwrite Dimensions if they are small enough,
+    # BUT we need stable keys. We used Hash Keys.
+    # So we can Safely Overwrite Dim Customer every time? Or Merge?
+    # Overwrite is safer for SCD recalculation from history.
+    # Merging SCD types is hard.
+    # Let's Overwrite Dimensions (they are small ~4k customers) but use STABLE Hash Keys.
     write_deltalake(os.path.join(gold_root, 'dim_customer'), df_cust, mode="overwrite")
 
-    # 3. dim_date
-    print("Creating dim_date (Delta)...")
+    # 3. dim_date - Static, usually generated once.
+    # We can overwrite or ignore.
+    print("Updating dim_date (Delta)...")
     con.execute(f"""
         CREATE OR REPLACE TABLE dim_date_tmp AS
         WITH date_spine AS (
             SELECT DISTINCT order_timestamp::DATE as full_date FROM delta_scan('{online_retail}')
             UNION
             SELECT DISTINCT order_timestamp::DATE as full_date FROM delta_scan('{pos_billing}')
-            UNION
-            SELECT DISTINCT log_timestamp::DATE as full_date FROM delta_scan('{warehouse_logs}')
-            UNION
-            SELECT DISTINCT ship_timestamp::DATE as full_date FROM delta_scan('{shipments}')
         )
         SELECT 
             (YEAR(full_date) * 10000 + MONTH(full_date) * 100 + DAY(full_date))::INTEGER as date_key,
@@ -133,8 +154,11 @@ def run_gold_transformation(con, silver_root, gold_root):
     df_date = con.query("SELECT * FROM dim_date_tmp").to_df()
     write_deltalake(os.path.join(gold_root, 'dim_date'), df_date, mode="overwrite")
 
-    # 4. fact_sales (Unified Online + POS with City)
-    print("Creating fact_sales (Delta)...")
+    # 4. fact_sales (Incremental)
+    # We need to only process *recent* sales?
+    # Or process all and MERGE to utilize idempotency?
+    # Since we have `sales_key` (hash based), we can MERGE.
+    print("Updating fact_sales (Delta)...")
     
     con.execute(f"""
         CREATE OR REPLACE TABLE fact_sales_tmp AS
@@ -158,8 +182,8 @@ def run_gold_transformation(con, silver_root, gold_root):
             MD5(s.invoice_id_new || s.product_id || quantity::VARCHAR || order_timestamp::VARCHAR) as sales_key,
             s.invoice_id_new as invoice_id,
             c.customer_key,
-            product_key,
-            date_key,
+            p.product_key,
+            (YEAR(s.order_timestamp) * 10000 + MONTH(s.order_timestamp) * 100 + DAY(s.order_timestamp))::INTEGER as date_key,
             quantity,
             unit_price,
             cost_price,
@@ -176,20 +200,22 @@ def run_gold_transformation(con, silver_root, gold_root):
              AND s.order_timestamp >= c.valid_from 
              AND (s.order_timestamp < c.valid_to OR c.valid_to IS NULL)
         JOIN dim_product_tmp p ON s.product_id = p.product_id
-        JOIN dim_date_tmp d ON TRY_CAST(s.order_timestamp AS DATE) = d.full_date
     """)
     
     df_sales = con.query("SELECT * FROM fact_sales_tmp").to_df()
-    write_deltalake(os.path.join(gold_root, 'fact_sales'), df_sales, mode="overwrite", partition_by=["year", "month", "day"])
+    merge_keys = ["sales_key"]
+    # Partition by year/month/day
+    merge_to_gold(con, os.path.join(gold_root, 'fact_sales'), df_sales, merge_keys, ["year", "month", "day"])
 
-    # 5. fact_inventory_movement
-    print("Creating fact_inventory (Delta)...")
+
+    # 5. fact_inventory (Incremental)
+    print("Updating fact_inventory (Delta)...")
     con.execute(f"""
         CREATE OR REPLACE TABLE fact_inventory_tmp AS
         SELECT 
             log_id,
-            product_key,
-            date_key,
+            p.product_key,
+            (YEAR(w.log_timestamp) * 10000 + MONTH(w.log_timestamp) * 100 + DAY(w.log_timestamp))::INTEGER as date_key,
             movement_type,
             qty_change,
             warehouse_id,
@@ -200,13 +226,13 @@ def run_gold_transformation(con, silver_root, gold_root):
             w.day
         FROM delta_scan('{warehouse_logs}') w
         JOIN dim_product_tmp p ON w.product_id = p.product_id
-        JOIN dim_date_tmp d ON w.log_timestamp::DATE = d.full_date
     """)
     df_inv = con.query("SELECT * FROM fact_inventory_tmp").to_df()
-    write_deltalake(os.path.join(gold_root, 'fact_inventory'), df_inv, mode="overwrite", partition_by=["year", "month", "day"])
+    # LogID is unique
+    merge_to_gold(con, os.path.join(gold_root, 'fact_inventory'), df_inv, ["log_id"], ["year", "month", "day"])
     
-    # 6. fact_shipments
-    print("Creating fact_shipments (Delta)...")
+    # 6. fact_shipments (Incremental)
+    print("Updating fact_shipments (Delta)...")
     con.execute(f"""
         CREATE OR REPLACE TABLE fact_shipments_tmp AS
         WITH unknown_cust AS (
@@ -231,10 +257,10 @@ def run_gold_transformation(con, silver_root, gold_root):
         GROUP BY ALL
     """)
     df_ship = con.query("SELECT * FROM fact_shipments_tmp").to_df()
-    write_deltalake(os.path.join(gold_root, 'fact_shipments'), df_ship, mode="overwrite", partition_by=["year", "month", "day"])
+    merge_to_gold(con, os.path.join(gold_root, 'fact_shipments'), df_ship, ["invoice_id"], ["year", "month", "day"])
     
-    # 7. KPI Summary (Pre-calculated for Dashboard Performance)
-    print("Creating kpi_summary (Delta)...")
+    # 7. KPI Summary (Always Overwrite / Aggregate)
+    print("Updating kpi_summary (Delta)...")
     con.execute(f"""
         CREATE OR REPLACE TABLE kpi_summary_tmp AS
         SELECT 
@@ -246,7 +272,7 @@ def run_gold_transformation(con, silver_root, gold_root):
     df_kpi = con.query("SELECT * FROM kpi_summary_tmp").to_df()
     write_deltalake(os.path.join(gold_root, 'kpi_summary'), df_kpi, mode="overwrite")
 
-    print(f"Successfully created Gold layer (Unified Star Schema) in Delta Lake format at {gold_root}")
+    print(f"Successfully updated Gold layer (Unified Star Schema) in Delta Lake format at {gold_root}")
 
 if __name__ == "__main__":
     SILVER_ROOT = 'medallion/silver'

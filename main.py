@@ -4,9 +4,10 @@ import json
 import subprocess
 import sys
 from datetime import datetime
+import urllib.request
 
 # --- TEMPORAL CONFIGURATION ---
-TEMPORAL_ACCELERATION = 1  # 1 real minute = 1 simulated day (24h)
+TEMPORAL_ACCELERATION = 10  # 1 real minute = 1 simulated day (24h)
 STATE_FILE = "data/state.json"
 # ------------------------------
 
@@ -41,6 +42,18 @@ def run_step(name, script_path, env):
     except subprocess.CalledProcessError as e:
         print(f"Error in {name}: {e}")
         return False
+
+def trigger_api_refresh():
+    """Tells the API to refresh its views and clear its cache."""
+    try:
+        url = "http://localhost:8001/api/admin/refresh"
+        with urllib.request.urlopen(url) as response:
+            if response.getcode() == 200:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] API Data Refresh Triggered Successfully.")
+            else:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] Warning: API Refresh returned status {response.getcode()}")
+    except Exception as e:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Warning: Could not trigger API refresh (is it running?): {e}")
 
 def main():
     # 1. Initialize Temporal State
@@ -104,7 +117,8 @@ def main():
             # Check for CHUNK flow (Silver -> Gold)
             if now - last_chunk_run >= PIPELINE_INTERVAL_CHUNK:
                 print(f"\n[{datetime.fromtimestamp(current_virtual).strftime('%Y-%m-%d %H:%M:%S')}] Triggering CHUNK Flow...")
-                run_step("Gold Layer", "pipeline/gold_layer.py", env)
+                if run_step("Gold Layer", "pipeline/gold_layer.py", env):
+                    trigger_api_refresh()
                 last_chunk_run = now
 
             # Check if any background process died

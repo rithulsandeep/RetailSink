@@ -5,6 +5,8 @@ import pandas as pd
 import json
 import os
 import threading
+import subprocess
+import sys
 
 app = FastAPI(title="RetailSink Analytics API")
 
@@ -55,9 +57,16 @@ def create_views():
         "silver_ship": "medallion/silver/shipments"
     }
     with db_lock:
+        print("Refreshing DuckDB Views and Clearing Cache...")
         for view_name, path in tables.items():
             if os.path.exists(path):
-                db_conn.execute(f"CREATE OR REPLACE VIEW {view_name} AS SELECT * FROM delta_scan('{path}')")
+                try:
+                    # Use delta_scan with explicit check
+                    db_conn.execute(f"CREATE OR REPLACE VIEW {view_name} AS SELECT * FROM delta_scan('{path}')")
+                except Exception as e:
+                    print(f"Error creating view {view_name}: {e}")
+            else:
+                print(f"Skipping view {view_name} as path does not exist: {path}")
     print("DuckDB Views Refreshed & Cache Cleared.")
 
 # Initial view creation
@@ -68,6 +77,30 @@ def refresh_data():
     """Manual trigger to refresh Delta metadata (views) and clear cache."""
     create_views()
     return {"status": "success", "message": "Delta views refreshed and cache cleared"}
+
+@app.post("/api/admin/sync")
+@app.get("/api/admin/sync")
+def force_sync():
+    """Forces a full Medallion pipeline run and refreshes data."""
+    scripts = [
+        "pipeline/bronze_layer.py",
+        "pipeline/silver_layer.py",
+        "pipeline/gold_layer.py"
+    ]
+    
+    results = []
+    for script in scripts:
+        print(f"Executing manual sync step: {script}")
+        try:
+            subprocess.run([sys.executable, script], check=True)
+            results.append({"script": script, "status": "success"})
+        except subprocess.CalledProcessError as e:
+            print(f"Error in manual sync step {script}: {e}")
+            results.append({"script": script, "status": "failed", "error": str(e)})
+            break # Stop if a step fails
+            
+    create_views()
+    return {"status": "success", "steps": results, "message": "Manual sync completed and cache cleared"}
 
 @app.get("/api/kpi/summary")
 def get_summary_kpis():

@@ -96,6 +96,7 @@ function App() {
     const [inventory, setInventory] = useState([]);
     const [lineageStats, setLineageStats] = useState([]);
     const [loading, setLoading] = useState(true);
+    const [isSyncing, setIsSyncing] = useState(false);
     const [theme, setTheme] = useState(() => {
         const savedTheme = localStorage.getItem('theme');
         return savedTheme || 'light';
@@ -134,6 +135,20 @@ function App() {
             console.error('Error fetching data:', err);
         } finally {
             setLoading(false);
+        }
+    };
+
+    const handleSync = async () => {
+        setIsSyncing(true);
+        try {
+            const res = await fetch('http://localhost:8001/api/admin/sync', { method: 'POST' });
+            const data = await res.json();
+            console.log('Sync result:', data);
+            await fetchData(); // Refresh all state
+        } catch (err) {
+            console.error('Sync failed:', err);
+        } finally {
+            setIsSyncing(false);
         }
     };
 
@@ -453,9 +468,32 @@ function App() {
                         {theme === 'light' ? '🌙' : '☀️'}
                     </button>
                     {view === 'dashboard' && (
-                        <button className="back-to-landing" onClick={() => setView('landing')}>
-                            Back to Home
-                        </button>
+                        <>
+                            <button
+                                className={`sync-button ${isSyncing ? 'syncing' : ''}`}
+                                onClick={handleSync}
+                                disabled={isSyncing}
+                                style={{
+                                    background: isSyncing ? 'var(--muted)' : 'var(--accent)',
+                                    color: 'white',
+                                    border: 'none',
+                                    padding: '8px 16px',
+                                    borderRadius: '8px',
+                                    cursor: isSyncing ? 'not-allowed' : 'pointer',
+                                    marginRight: '10px',
+                                    fontFamily: 'Outfit',
+                                    fontWeight: '600',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '8px'
+                                }}
+                            >
+                                {isSyncing ? '⚙️ Syncing...' : '🔄 Sync Data'}
+                            </button>
+                            <button className="back-to-landing" onClick={() => setView('landing')}>
+                                Back to Home
+                            </button>
+                        </>
                     )}
                 </div>
             </header>
