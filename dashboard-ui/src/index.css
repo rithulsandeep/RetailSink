@@ -165,7 +165,7 @@ body {
     max-width: 1200px;
     margin: 0 auto;
     position: relative;
-    overflow: hidden;
+    overflow: visible;
     min-height: calc(100vh - 80px);
 }
 

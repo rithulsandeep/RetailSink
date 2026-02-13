@@ -294,7 +294,6 @@ function App() {
 
     const LandingView = () => (
         <section className="hero-section landing-fade-in">
-            <BackgroundAnimation />
             <div className="hero-visual"></div>
             <div className="hero-3d-shape"></div>
             <div className="hero-tag">Intelligent Commerce</div>
@@ -444,6 +443,7 @@ function App() {
 
     return (
         <div className="dashboard">
+            {view === 'landing' && <BackgroundAnimation />}
             <header className="header">
                 <div className="header-title" onClick={() => setView('landing')} style={{ cursor: 'pointer' }}>
                     RETAILSINK
