@@ -89,7 +89,7 @@ def main():
     for name, path in services.items():
         print(f"Starting {name} background process...")
         p = subprocess.Popen([sys.executable, path], env=env)
-        processes.append(p)
+        processes.append((name, p))
 
     print("-" * 60)
     print("Platform is now RUNNING.")
@@ -122,15 +122,20 @@ def main():
                 last_chunk_run = now
 
             # Check if any background process died
-            for p in processes:
+            # Check processes and map pids
+            active_processes = []
+            for name, p in processes:
                 if p.poll() is not None:
-                    print(f"WARNING: One of the background processes died (PID: {p.pid})")
+                     print(f"WARNING: {name} died (PID: {p.pid}). Exit Code: {p.returncode}")
+                else:
+                    active_processes.append((name, p))
+            processes[:] = active_processes
             
             time.sleep(2) # State update frequency
 
     except KeyboardInterrupt:
         print("\nShutting down RetailSink...")
-        for p in processes:
+        for name, p in processes:
             p.terminate()
         print("Shutdown complete.")
 

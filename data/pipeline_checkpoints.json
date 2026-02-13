@@ -1,6 +1,14 @@
 {
-    "landing/Online_retail_data.csv": 1070958,
-    "landing/pos_billing_data.csv": 17948,
-    "landing/warehouse_inventory_data.csv": 12668,
-    "landing/shipments_data.csv": 46883
+    "silver_shipments": 42,
+    "silver_pos_billing": 38,
+    "silver_warehouse": 29,
+    "silver_online_retail": 48,
+    "gold_dim_inputs_retail": 45,
+    "gold_dim_inputs_pos": 44,
+    "gold_dim_inputs_warehouse": 38,
+    "gold_dim_inputs_ship": 44,
+    "landing/Online_retail_data.csv": 1072029,
+    "landing/pos_billing_data.csv": 19207,
+    "landing/warehouse_inventory_data.csv": 12944,
+    "landing/shipments_data.csv": 47320
 }

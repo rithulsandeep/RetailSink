@@ -1,5 +1,9 @@
 import duckdb
 import os
+import sys
+# Add project root to sys.path to import pipeline.utils
+sys.path.append(os.getcwd())
+from pipeline.utils import get_incremental_scan_query, save_checkpoints, load_checkpoints
 from deltalake import DeltaTable, write_deltalake
 
 def init_duckdb():
@@ -7,20 +11,9 @@ def init_duckdb():
     con.execute("INSTALL delta; LOAD delta;")
     return con
 
-def get_bronze_scan(bronze_path):
-    # For now, we scan the full bronze table.
-    # To be truly incremental from Bronze to Silver, we would need to track Bronze table versions.
-    # However, since Bronze is Append-Only, we can also use MERGE in Silver to handle "New" records.
-    # If we want to avoid reading full Bronze, we'd need:
-    # SELECT * FROM delta_scan('path') WHERE _commit_timestamp > last_run
-    # For this iteration, we will read Bronze (which is growing) and use MERGE in Silver to be idempotent.
-    return f"delta_scan('{bronze_path}')"
-
 def merge_to_silver(con, silver_path, df, unique_keys, partition_cols, timestamp_col):
     """
     Merges data into Silver Delta table.
-    If table doesn't exist, create it.
-    If exists, MERGE based on unique keys.
     """
     if df.empty:
         print("No data to merge.")
@@ -33,17 +26,7 @@ def merge_to_silver(con, silver_path, df, unique_keys, partition_cols, timestamp
         print(f"Merging into existing Silver table at {silver_path}")
         dt = DeltaTable(silver_path)
         
-        # Construct merge predicate
-        # source.key = target.key
         predicate = " AND ".join([f"s.{k} = t.{k}" for k in unique_keys])
-        
-        # DuckDB -> Arrow -> Delta Merge
-        # DeltaTable.merge() in python requires:
-        # source: pyarrow table, pandas df, etc.
-        # predicate: str
-        # source_alias: str, target_alias: str
-        # when_matched_update_all()
-        # when_not_matched_insert_all()
         
         (
             dt.merge(
@@ -58,9 +41,31 @@ def merge_to_silver(con, silver_path, df, unique_keys, partition_cols, timestamp
         )
     print("Merge complete.")
 
-def process_online_retail(con, bronze_path, silver_path):
-    print(f"--- ELT: Normalizing Online Retail (ERP) to Delta ---")
+def process_table(con, task_id, bronze_path, silver_path, query_template, merge_keys, partition_cols, timestamp_col):
+    scan_query, new_version, has_updates = get_incremental_scan_query(bronze_path, task_id)
     
+    if not has_updates:
+        print(f"Skipping {task_id}: No new updates in Bronze (Version {new_version}).")
+        return
+
+    print(f"--- ELT: Processing {task_id} (Bronze v{new_version}) ---")
+    
+    # Inject scan query into template (replacing placeholder)
+    query = query_template.replace("__SOURCE__", scan_query)
+    
+    try:
+        df = con.query(query).to_df()
+        merge_to_silver(con, silver_path, df, merge_keys, partition_cols, timestamp_col)
+        
+        # Update checkpoint
+        checkpoints = load_checkpoints()
+        checkpoints[task_id] = new_version
+        save_checkpoints(checkpoints)
+        
+    except Exception as e:
+        print(f"Error processing {task_id}: {e}")
+
+def process_online_retail(con, bronze_path, silver_path):
     query = f"""
     SELECT 
         REGEXP_REPLACE(TRIM(InvoiceNo), '^C', '', 'i')::VARCHAR as invoice_id,
@@ -79,27 +84,17 @@ def process_online_retail(con, bronze_path, silver_path):
         COALESCE(year, YEAR(order_timestamp)) as year,
         COALESCE(month, MONTH(order_timestamp)) as month,
         COALESCE(day, DAY(order_timestamp)) as day
-    FROM {get_bronze_scan(bronze_path)}
+    FROM __SOURCE__
     WHERE invoice_id IS NOT NULL 
       AND invoice_id != ''
       AND TRY_CAST(UnitPrice AS DOUBLE) > 0
     QUALIFY ROW_NUMBER() OVER(PARTITION BY invoice_id, product_id, quantity, order_timestamp ORDER BY order_timestamp DESC) = 1
     """
-    # Note: We filter duplicates in the source query before merge
-    
-    df = con.query(query).to_df()
-    
-    # Merge Keys: Composite key to identify unique line item?
-    # invoice_id + product_id is usually unique per invoice, but quantity could differ?
-    # In retail data, sometimes same product appears twice in invoice?
-    # Let's assume invoice_id, product_id, quantity, order_timestamp is Row ID.
-    merge_keys = ["invoice_id", "product_id", "quantity", "order_timestamp"]
-    
-    merge_to_silver(con, silver_path, df, merge_keys, ["year", "month", "day"], "order_timestamp")
+    process_table(con, "silver_online_retail", bronze_path, silver_path, query, 
+                  ["invoice_id", "product_id", "quantity", "order_timestamp"], 
+                  ["year", "month", "day"], "order_timestamp")
 
 def process_pos_billing(con, bronze_path, silver_path):
-    print(f"--- ELT: Normalizing POS Billing (In-Store) to Delta ---")
-    
     query = f"""
     SELECT 
         TRIM(BillNo)::VARCHAR as invoice_id,
@@ -118,7 +113,7 @@ def process_pos_billing(con, bronze_path, silver_path):
         COALESCE(year, YEAR(order_timestamp)) as year,
         COALESCE(month, MONTH(order_timestamp)) as month,
         COALESCE(day, DAY(order_timestamp)) as day
-    FROM {get_bronze_scan(bronze_path)}
+    FROM __SOURCE__
     WHERE invoice_id IS NOT NULL 
       AND invoice_id != ''
       AND quantity IS NOT NULL
@@ -126,13 +121,11 @@ def process_pos_billing(con, bronze_path, silver_path):
       AND unit_price > 0
     QUALIFY ROW_NUMBER() OVER(PARTITION BY invoice_id, product_id, quantity, order_timestamp ORDER BY order_timestamp DESC) = 1
     """
-    df = con.query(query).to_df()
-    merge_keys = ["invoice_id", "product_id", "quantity", "order_timestamp"]
-    merge_to_silver(con, silver_path, df, merge_keys, ["year", "month", "day"], "order_timestamp")
+    process_table(con, "silver_pos_billing", bronze_path, silver_path, query, 
+                  ["invoice_id", "product_id", "quantity", "order_timestamp"], 
+                  ["year", "month", "day"], "order_timestamp")
 
 def process_warehouse(con, bronze_path, silver_path):
-    print(f"--- ELT: Normalizing Warehouse Logs to Delta ---")
-    
     query = f"""
     SELECT 
         LogID as log_id,
@@ -148,18 +141,14 @@ def process_warehouse(con, bronze_path, silver_path):
         year,
         month,
         day
-    FROM {get_bronze_scan(bronze_path)}
+    FROM __SOURCE__
     WHERE product_id IS NOT NULL
     QUALIFY ROW_NUMBER() OVER(PARTITION BY log_id ORDER BY log_timestamp DESC) = 1
     """
-    df = con.query(query).to_df()
-    # LogID should be unique
-    merge_keys = ["log_id"]
-    merge_to_silver(con, silver_path, df, merge_keys, ["year", "month", "day"], "log_timestamp")
+    process_table(con, "silver_warehouse", bronze_path, silver_path, query, 
+                  ["log_id"], ["year", "month", "day"], "log_timestamp")
 
 def process_shipments(con, bronze_path, silver_path):
-    print(f"--- ELT: Normalizing Shipment Data to Delta ---")
-    
     query = f"""
     SELECT 
         REGEXP_REPLACE(TRIM(invoice_id), '^C', '', 'i') as invoice_id,
@@ -170,42 +159,47 @@ def process_shipments(con, bronze_path, silver_path):
         year,
         month,
         day
-    FROM {get_bronze_scan(bronze_path)}
+    FROM __SOURCE__
     QUALIFY ROW_NUMBER() OVER(PARTITION BY invoice_id ORDER BY ship_timestamp DESC) = 1
     """
-    df = con.query(query).to_df()
-    merge_keys = ["invoice_id"]
-    merge_to_silver(con, silver_path, df, merge_keys, ["year", "month", "day"], "ship_timestamp")
+    process_table(con, "silver_shipments", bronze_path, silver_path, query, 
+                  ["invoice_id"], ["year", "month", "day"], "ship_timestamp")
+
 
 if __name__ == "__main__":
+    import concurrent.futures
+    import time
+
     BRONZE_ROOT = 'medallion/bronze'
     SILVER_ROOT = 'medallion/silver'
     
-    con = init_duckdb()
-    
-    try:
-        process_online_retail(
-            con,
-            os.path.join(BRONZE_ROOT, 'Online_retail_data'),
-            os.path.join(SILVER_ROOT, 'online_retail')
-        )
+    # Wrapper to run with own connection
+    def run_task(task_func, source, target):
+        con = init_duckdb()
+        try:
+            task_func(con, source, target)
+        except Exception as e:
+            print(f"Error in {task_func.__name__}: {e}")
+            raise e
+        finally:
+            con.close()
+
+    start_time = time.time()
+    print("--- Starting Parallel Silver Layer Processing ---")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [
+            executor.submit(run_task, process_online_retail, os.path.join(BRONZE_ROOT, 'Online_retail_data'), os.path.join(SILVER_ROOT, 'online_retail')),
+            executor.submit(run_task, process_pos_billing, os.path.join(BRONZE_ROOT, 'pos_billing_data'), os.path.join(SILVER_ROOT, 'pos_billing')),
+            executor.submit(run_task, process_warehouse, os.path.join(BRONZE_ROOT, 'warehouse_inventory_data'), os.path.join(SILVER_ROOT, 'warehouse_logs')),
+            executor.submit(run_task, process_shipments, os.path.join(BRONZE_ROOT, 'shipments_data'), os.path.join(SILVER_ROOT, 'shipments'))
+        ]
         
-        process_pos_billing(
-            con,
-            os.path.join(BRONZE_ROOT, 'pos_billing_data'),
-            os.path.join(SILVER_ROOT, 'pos_billing')
-        )
+        # Wait for all
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                future.result()
+            except Exception as e:
+                print(f"Task failed: {e}")
 
-        process_warehouse(
-            con,
-            os.path.join(BRONZE_ROOT, 'warehouse_inventory_data'),
-            os.path.join(SILVER_ROOT, 'warehouse_logs')
-        )
-
-        process_shipments(
-            con,
-            os.path.join(BRONZE_ROOT, 'shipments_data'),
-            os.path.join(SILVER_ROOT, 'shipments')
-        )
-    finally:
-        con.close()
+    print(f"--- Silver Layer Finished in {time.time() - start_time:.2f}s ---")
