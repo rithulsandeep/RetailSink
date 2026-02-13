@@ -165,7 +165,8 @@ body {
     max-width: 1200px;
     margin: 0 auto;
     position: relative;
-    overflow: visible;
+    overflow: hidden;
+    min-height: calc(100vh - 80px);
 }
 
 .hero-visual {
