@@ -14,17 +14,17 @@ def process_live_sales(con, bronze_path, silver_path):
     query = f"""
     COPY (
         SELECT 
-            order_id::VARCHAR as order_id,
-            store_id::VARCHAR as store_id,
-            customer_id::VARCHAR as customer_id,
-            customer_city,
-            region,
-            product_category,
-            channel,
+            TRIM(order_id)::VARCHAR as order_id,
+            TRIM(store_id)::VARCHAR as store_id,
+            TRIM(customer_id)::VARCHAR as customer_id,
+            TRIM(customer_city) as customer_city,
+            TRIM(region) as region,
+            TRIM(UPPER(product_category)) as product_category,
+            TRIM(UPPER(channel)) as channel,
             quantity,
             price_per_unit,
             discount,
-            payment_method,
+            TRIM(UPPER(payment_method)) as payment_method,
             holiday_flag,
             order_status,
             total_amount,
@@ -35,7 +35,11 @@ def process_live_sales(con, bronze_path, silver_path):
             month,
             day
         FROM read_parquet('{bronze_path}/**/*.parquet')
-        QUALIFY ROW_NUMBER() OVER(PARTITION BY order_id ORDER BY timestamp DESC) = 1
+        WHERE order_id IS NOT NULL 
+          AND order_id != ''
+          AND quantity > 0
+          AND price_per_unit > 0
+        QUALIFY ROW_NUMBER() OVER(PARTITION BY order_id, product_category, quantity ORDER BY timestamp DESC) = 1
     ) TO '{silver_path}' (FORMAT PARQUET, PARTITION_BY (year, month, day), OVERWRITE_OR_IGNORE);
     """
     con.execute(query)
@@ -54,14 +58,14 @@ def process_online_retail(con, bronze_path, silver_path):
     query = f"""
     COPY (
         SELECT 
-            Invoice::VARCHAR as invoice_id,
-            StockCode::VARCHAR as product_id,
-            Description as product_description,
+            TRIM(Invoice)::VARCHAR as invoice_id,
+            TRIM(UPPER(StockCode))::VARCHAR as product_id,
+            COALESCE(NULLIF(TRIM(UPPER(Description)), ''), 'UNKNOWN') as product_description,
             Quantity as quantity,
             InvoiceDate as order_timestamp,
             Price as unit_price,
-            COALESCE("Customer ID"::VARCHAR, 'Unknown') as customer_id,
-            Country as country,
+            COALESCE(NULLIF(TRIM("Customer ID"), ''), 'Unknown') as customer_id,
+            TRIM(Country) as country,
             'erp' as source_system,
             ROUND(Quantity * Price, 2) as total_amount,
             (invoice_id LIKE 'C%') as is_cancelled,
@@ -69,6 +73,12 @@ def process_online_retail(con, bronze_path, silver_path):
             month,
             day
         FROM read_parquet('{bronze_path}/**/*.parquet')
+        WHERE Invoice IS NOT NULL 
+          AND Invoice != ''
+          AND StockCode IS NOT NULL 
+          AND StockCode != ''
+          AND Price > 0
+          AND (Quantity > 0 OR (TRIM(Invoice) LIKE 'C%' AND Quantity < 0))
         QUALIFY ROW_NUMBER() OVER(PARTITION BY invoice_id, product_id, quantity, order_timestamp) = 1
     ) TO '{silver_path}' (FORMAT PARQUET, PARTITION_BY (year, month, day), OVERWRITE_OR_IGNORE);
     """
