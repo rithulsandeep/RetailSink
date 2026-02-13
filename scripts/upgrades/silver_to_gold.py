@@ -48,28 +48,62 @@ def run_gold_transformation(con, silver_root, gold_root):
     df_prod = con.query("SELECT * FROM dim_product_tmp").to_df()
     write_deltalake(os.path.join(gold_root, 'dim_product'), df_prod, mode="overwrite")
 
-    # 2. dim_customer (Truly Unified - unique per customer_id)
-    print("Creating dim_customer (Delta)...")
+    # 2. dim_customer (SCD Type 2 - tracking address changes)
+    print("Creating dim_customer (Delta - SCD Type 2)...")
     con.execute(f"""
         CREATE OR REPLACE TABLE dim_customer_tmp AS
+        WITH raw_customers AS (
+            SELECT customer_id, city, country, order_timestamp, 'Online' as source FROM delta_scan('{online_retail}')
+            UNION ALL
+            SELECT customer_id, city, country, order_timestamp, 'POS' as source FROM delta_scan('{pos_billing}')
+        ),
+        valid_customers AS (
+            SELECT * FROM raw_customers 
+            WHERE customer_id IS NOT NULL AND customer_id != 'Unknown'
+        ),
+        ordered_customers AS (
+            SELECT 
+                customer_id, city, country, order_timestamp, source,
+                LAG(city) OVER (PARTITION BY customer_id ORDER BY order_timestamp) as prev_city,
+                LAG(country) OVER (PARTITION BY customer_id ORDER BY order_timestamp) as prev_country
+            FROM valid_customers
+        ),
+        version_starts AS (
+            SELECT 
+                customer_id, city, country, source, order_timestamp as valid_from
+            FROM ordered_customers
+            WHERE prev_city IS NULL OR city != prev_city OR country != prev_country
+        ),
+        versions AS (
+            SELECT 
+                customer_id, city, country, source,
+                valid_from,
+                LEAD(valid_from) OVER (PARTITION BY customer_id ORDER BY valid_from) as valid_to,
+                (LEAD(valid_from) OVER (PARTITION BY customer_id ORDER BY valid_from) IS NULL) as is_current
+            FROM version_starts
+        )
         SELECT 
             ROW_NUMBER() OVER () as customer_key,
             customer_id,
-            source
-        FROM (
-            SELECT customer_id, source
-            FROM (
-                SELECT DISTINCT customer_id, 'Online' as source FROM delta_scan('{online_retail}')
-                UNION
-                SELECT DISTINCT customer_id, 'POS' as source FROM delta_scan('{pos_billing}')
-            )
-            WHERE customer_id IS NOT NULL AND customer_id != 'Unknown'
-            QUALIFY ROW_NUMBER() OVER(PARTITION BY customer_id ORDER BY source) = 1
-            
-            UNION ALL
-            -- Ensure 'Unknown' remains in the dimension
-            SELECT 'Unknown' as customer_id, 'SYSTEM' as source
-        )
+            city,
+            country,
+            source,
+            valid_from,
+            valid_to,
+            is_current
+        FROM versions
+        
+        UNION ALL
+        -- Ensure 'Unknown' remains in the dimension
+        SELECT 
+            0 as customer_key, 
+            'Unknown' as customer_id, 
+            'Unknown' as city, 
+            'Unknown' as country, 
+            'SYSTEM' as source,
+            '1900-01-01'::TIMESTAMP as valid_from, 
+            NULL::TIMESTAMP as valid_to, 
+            true as is_current
     """)
     df_cust = con.query("SELECT * FROM dim_customer_tmp").to_df()
     write_deltalake(os.path.join(gold_root, 'dim_customer'), df_cust, mode="overwrite")
@@ -123,7 +157,7 @@ def run_gold_transformation(con, silver_root, gold_root):
         SELECT 
             MD5(s.invoice_id_new || s.product_id || quantity::VARCHAR || order_timestamp::VARCHAR) as sales_key,
             s.invoice_id_new as invoice_id,
-            customer_key,
+            c.customer_key,
             product_key,
             date_key,
             quantity,
@@ -138,7 +172,9 @@ def run_gold_transformation(con, silver_root, gold_root):
             s.day
         FROM combined_sales s
         LEFT JOIN shipment_lookup sh ON s.invoice_id_new = sh.invoice_id_new
-        JOIN dim_customer_tmp c ON s.customer_id = c.customer_id
+        JOIN dim_customer_tmp c ON s.customer_id = c.customer_id 
+             AND s.order_timestamp >= c.valid_from 
+             AND (s.order_timestamp < c.valid_to OR c.valid_to IS NULL)
         JOIN dim_product_tmp p ON s.product_id = p.product_id
         JOIN dim_date_tmp d ON TRY_CAST(s.order_timestamp AS DATE) = d.full_date
     """)
