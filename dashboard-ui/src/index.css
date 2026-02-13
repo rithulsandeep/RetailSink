@@ -5,7 +5,7 @@
   --text: #323130;
   --text-secondary: #605e5c;
   --border: #edebe9;
-  --shadow: 0 1.6px 3.6px 0 rgba(0,0,0,0.132), 0 0.3px 0.9px 0 rgba(0,0,0,0.108);
+  --shadow: 0 1.6px 3.6px 0 rgba(0, 0, 0, 0.132), 0 0.3px 0.9px 0 rgba(0, 0, 0, 0.108);
 }
 
 * {
@@ -97,10 +97,133 @@ body {
   .main-content {
     grid-template-columns: repeat(2, 1fr);
   }
+
   .chart-container {
     grid-column: span 2;
   }
+
   .full-chart {
     grid-column: span 2;
   }
+}
+
+/* Lineage Visualization Styles */
+.lineage-container {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 40px 20px;
+  background: var(--card-bg);
+  border-radius: 4px;
+  box-shadow: var(--shadow);
+  overflow-x: auto;
+}
+
+.lineage-step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  position: relative;
+  min-width: 150px;
+}
+
+.lineage-node {
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  border: 4px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  background-color: #fff;
+  z-index: 2;
+  transition: all 0.3s ease;
+  cursor: help;
+}
+
+.lineage-node:hover {
+  transform: scale(1.1);
+  border-color: var(--primary);
+  box-shadow: 0 0 15px rgba(0, 120, 212, 0.3);
+}
+
+.node-landing {
+  border-color: #8dbbe9;
+}
+
+.node-bronze {
+  border-color: #cd7f32;
+}
+
+.node-silver {
+  border-color: #c0c0c0;
+}
+
+.node-gold {
+  border-color: #ffd700;
+}
+
+.node-count {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.node-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+.lineage-label {
+  margin-top: 12px;
+  font-weight: 600;
+  font-size: 14px;
+  text-align: center;
+}
+
+.lineage-subtext {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 4px;
+  max-width: 120px;
+  text-align: center;
+}
+
+.lineage-arrow {
+  flex: 1;
+  height: 2px;
+  background: var(--border);
+  margin: 0 -20px;
+  position: relative;
+  z-index: 1;
+  min-width: 50px;
+}
+
+.lineage-arrow::after {
+  content: '▶';
+  position: absolute;
+  right: -5px;
+  top: -8px;
+  color: var(--border);
+  font-size: 12px;
+}
+
+.lineage-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 15px;
+}
+
+.status-indicator {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-right: 6px;
+  background-color: #107c10;
+  /* Solid Green */
 }

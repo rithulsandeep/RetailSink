@@ -1,0 +1,72 @@
+[
+    {
+        "layer": "Landing",
+        "name": "Online Retail (CSV)",
+        "count": 1067370
+    },
+    {
+        "layer": "Landing",
+        "name": "POS Billing (CSV)",
+        "count": 10000
+    },
+    {
+        "layer": "Landing",
+        "name": "Warehouse (CSV)",
+        "count": 10000
+    },
+    {
+        "layer": "Bronze",
+        "name": "Online Retail (Bronze)",
+        "count": 1067370
+    },
+    {
+        "layer": "Bronze",
+        "name": "POS Billing (Bronze)",
+        "count": 1019
+    },
+    {
+        "layer": "Bronze",
+        "name": "Warehouse (Bronze)",
+        "count": 8488
+    },
+    {
+        "layer": "Silver",
+        "name": "Online Retail (Silver)",
+        "count": 1026757
+    },
+    {
+        "layer": "Silver",
+        "name": "POS Billing (Silver)",
+        "count": 995
+    },
+    {
+        "layer": "Silver",
+        "name": "Warehouse (Silver)",
+        "count": 8326
+    },
+    {
+        "layer": "Gold",
+        "name": "dim_product (Gold)",
+        "count": 5059
+    },
+    {
+        "layer": "Gold",
+        "name": "dim_customer (Gold)",
+        "count": 6820
+    },
+    {
+        "layer": "Gold",
+        "name": "dim_date (Gold)",
+        "count": 1335
+    },
+    {
+        "layer": "Gold",
+        "name": "fact_sales (Gold)",
+        "count": 1027752
+    },
+    {
+        "layer": "Gold",
+        "name": "fact_inventory (Gold)",
+        "count": 8326
+    }
+]

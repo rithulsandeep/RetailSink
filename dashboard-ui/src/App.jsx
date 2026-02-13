@@ -34,23 +34,77 @@ const KPICard = ({ label, value, loading }) => (
     </div>
 );
 
+const LineageNode = ({ name, count, layer }) => (
+    <div className="lineage-step">
+        <div className={`lineage-node node-${layer.toLowerCase()}`} title={`${name}: ${count.toLocaleString()} rows`}>
+            <div className="node-count">{count > 1000000 ? (count / 1000000).toFixed(1) + 'M' : count.toLocaleString()}</div>
+            <div className="node-label">{layer}</div>
+        </div>
+        <div className="lineage-label">{name.split(' (')[0]}</div>
+    </div>
+);
+
+const MedallionLineage = ({ stats }) => {
+    // Group stats by layer
+    const landing = stats.filter(s => s.layer === 'Landing');
+    const bronze = stats.filter(s => s.layer === 'Bronze');
+    const silver = stats.filter(s => s.layer === 'Silver');
+    const gold = stats.filter(s => s.layer === 'Gold');
+
+    const totalLanding = landing.reduce((acc, s) => acc + s.count, 0);
+    const totalBronze = bronze.reduce((acc, s) => acc + s.count, 0);
+    const totalSilver = silver.reduce((acc, s) => acc + s.count, 0);
+    const totalGoldFact = gold.filter(g => g.name.startsWith('fact')).reduce((acc, s) => acc + s.count, 0);
+
+    return (
+        <div className="chart-container full-chart" style={{ padding: '30px' }}>
+            <div className="lineage-header">
+                <div>
+                    <span className="status-indicator"></span>
+                    <strong>Data Transformation Lineage (Data Funnel)</strong>
+                </div>
+                <div style={{ fontSize: '12px', color: '#666' }}>
+                    Visualizing 4 pipeline stages
+                </div>
+            </div>
+            <div className="lineage-container">
+                <LineageNode layer="Landing" name="Raw Sources" count={totalLanding} />
+                <div className="lineage-arrow"></div>
+                <LineageNode layer="Bronze" name="Ingested" count={totalBronze} />
+                <div className="lineage-arrow"></div>
+                <LineageNode layer="Silver" name="Normalized" count={totalSilver} />
+                <div className="lineage-arrow"></div>
+                <LineageNode layer="Gold" name="Business Ready" count={totalGoldFact} />
+            </div>
+            <div style={{ marginTop: '20px', display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px' }}>
+                <div className="lineage-subtext">CSV/XLSX raw files from ERP, POS, WMS systems.</div>
+                <div className="lineage-subtext">Partitioned Parquet. Preservation of original data.</div>
+                <div className="lineage-subtext">Cleaned, Deduplicated, Typed, and Normalized.</div>
+                <div className="lineage-subtext">Unified Star Schema (Facts & Dimensions).</div>
+            </div>
+        </div>
+    );
+};
+
 function App() {
     const [summary, setSummary] = useState({});
     const [revenueTrend, setRevenueTrend] = useState([]);
     const [topProducts, setTopProducts] = useState([]);
     const [channelDist, setChannelDist] = useState([]);
     const [inventory, setInventory] = useState([]);
+    const [lineageStats, setLineageStats] = useState([]);
     const [loading, setLoading] = useState(true);
 
     const fetchData = async () => {
         setLoading(true);
         try {
-            const [sumRes, revRes, prodRes, chanRes, invRes] = await Promise.all([
+            const [sumRes, revRes, prodRes, chanRes, invRes, linRes] = await Promise.all([
                 fetch(`${API_BASE}/summary`).then(r => r.json()),
                 fetch(`${API_BASE}/revenue-trend`).then(r => r.json()),
                 fetch(`${API_BASE}/top-products`).then(r => r.json()),
                 fetch(`${API_BASE}/sales-channel`).then(r => r.json()),
                 fetch(`${API_BASE}/inventory-status`).then(r => r.json()),
+                fetch(`${API_BASE}/lineage-stats`).then(r => r.json()),
             ]);
 
             setSummary(sumRes);
@@ -58,6 +112,7 @@ function App() {
             setTopProducts(prodRes);
             setChannelDist(chanRes);
             setInventory(invRes);
+            setLineageStats(linRes);
         } catch (err) {
             console.error('Error fetching data:', err);
         } finally {
@@ -141,6 +196,14 @@ function App() {
                     </button>
                     <div className="kpi-label">Last updated: {new Date().toLocaleTimeString()}</div>
                 </div>
+
+                {loading ? (
+                    <div className="chart-container full-chart" style={{ textAlign: 'center', padding: '100px' }}>
+                        Loading Data Lineage...
+                    </div>
+                ) : (
+                    <MedallionLineage stats={lineageStats} />
+                )}
 
                 <div className="chart-container full-chart">
                     <div className="chart-header">Revenue Trend (Last 12 Months)</div>

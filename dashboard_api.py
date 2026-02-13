@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import duckdb
 import pandas as pd
 import json
+import os
 
 app = FastAPI(title="Retail Analytics API")
 
@@ -105,6 +106,67 @@ def get_inventory_status():
     LIMIT 10
     """
     return db.query(query).to_df().to_dict(orient='records')
+
+@app.get("/api/kpi/lineage-stats")
+def get_lineage_stats():
+    db = get_db()
+    
+    stats = []
+    
+    # 1. Landing (CSVs) - Use duckdb for counts
+    landing_paths = {
+        "Online Retail (Landing)": "landing/Online_retail_data.csv",
+        "POS Billing (Landing)": "landing/pos_billing_data.csv",
+        "Warehouse (Landing)": "landing/warehouse_inventory_data.csv"
+    }
+    
+    for name, path in landing_paths.items():
+        if os.path.exists(path):
+            try:
+                # DuckDB reading CSV for count is faster than pandas
+                count = db.execute(f"SELECT COUNT(*) FROM read_csv_auto('{path}')").fetchone()[0]
+                stats.append({"layer": "Landing", "name": name, "count": count})
+            except Exception as e:
+                print(f"Error counting {path}: {e}")
+
+    # 2. Bronze
+    bronze_paths = {
+        "Online Retail (Bronze)": "medallion/bronze/Online_retail_data",
+        "POS Billing (Bronze)": "medallion/bronze/pos_billing_data",
+        "Warehouse (Bronze)": "medallion/bronze/warehouse_inventory_data"
+    }
+    for name, path in bronze_paths.items():
+        if os.path.exists(path):
+            count = db.execute(f"SELECT COUNT(*) FROM read_parquet('{path}/**/*.parquet')").fetchone()[0]
+            stats.append({"layer": "Bronze", "name": name, "count": count})
+
+    # 3. Silver
+    silver_paths = {
+        "Online Retail (Silver)": "medallion/silver/online_retail",
+        "POS Billing (Silver)": "medallion/silver/pos_billing",
+        "Warehouse (Silver)": "medallion/silver/warehouse_logs"
+    }
+    for name, path in silver_paths.items():
+        if os.path.exists(path):
+            count = db.execute(f"SELECT COUNT(*) FROM read_parquet('{path}/**/*.parquet')").fetchone()[0]
+            stats.append({"layer": "Silver", "name": name, "count": count})
+
+    # 4. Gold
+    gold_entities = {
+        "dim_product (Gold)": DIM_PRODUCT,
+        "dim_customer (Gold)": DIM_CUSTOMER,
+        "dim_date (Gold)": DIM_DATE,
+        "fact_sales (Gold)": FACT_SALES,
+        "fact_inventory (Gold)": FACT_INVENTORY
+    }
+    for name, path in gold_entities.items():
+        try:
+            count = db.execute(f"SELECT COUNT(*) FROM read_parquet('{path}')").fetchone()[0]
+            stats.append({"layer": "Gold", "name": name, "count": count})
+        except:
+            pass
+
+    return stats
 
 if __name__ == "__main__":
     import uvicorn
