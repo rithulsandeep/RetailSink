@@ -15,6 +15,9 @@ WAREHOUSES = ["WH-MUMBAI-01", "WH-DELHI-02", "WH-BENGALURU-01", "WH-CHENNAI-03",
 SUPPLIERS = ["Bharat Logistics", "India Mart", "Reliant Supply Co.", "Apex Distribution", "Gati Shipments"]
 ORIGINS = ["Mumbai", "Guangzhou", "Hamburg", "New Delhi", "Pune", "Ho Chi Minh City"]
 
+# ----------------------------------------------
+# SIMULATION TIME DUE TO TEMPORAL ACCELERATION
+# ----------------------------------------------
 def get_simulated_now():
     factor = float(os.environ.get("SIM_ACCELERATION_FACTOR", 1.0))
     start_real = float(os.environ.get("SIM_START_REAL_TIME", time.time()))

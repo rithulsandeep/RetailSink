@@ -65,6 +65,7 @@ def simulate_shipment_generation(interval_seconds=60):
             sim_now = get_simulated_now()
             print(f"[{sim_now.strftime('%H:%M:%S')}] Generating shipments for {len(new_invoices)} new invoices...")
             
+            destination_countries = ["India", "United Kingdom", "France", "Germany", "USA", "Australia", "UAE", "Japan"]
             cities = ["Mumbai", "Delhi", "Bengaluru", "Hyderabad", "Ahmedabad", "Chennai", "Kolkata", "Surat", "Pune", "Jaipur", "Lucknow", "Kanpur", "Nagpur", "Indore", "Thane", "Bhopal", "Visakhapatnam", "Pimpri-Chinchwad", "Patna", "Vadodara"]
             
             def generate_shipment_details(row):
@@ -72,7 +73,8 @@ def simulate_shipment_generation(interval_seconds=60):
                 ship_time = order_time + timedelta(hours=random.randint(4, 48))
                 delivery_time = ship_time + timedelta(days=random.randint(2, 7))
                 city = random.choice(cities)
-                return pd.Series([ship_time, delivery_time, city, "India"])
+                country = random.choice(destination_countries)
+                return pd.Series([ship_time, delivery_time, city, country])
 
             new_invoices[['ship_timestamp', 'delivery_timestamp', 'city', 'country']] = new_invoices.apply(generate_shipment_details, axis=1)
             

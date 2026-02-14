@@ -12,6 +12,7 @@ OUTPUT_FILE = "landing/Online_retail_data.csv"
 fake = Faker("en_IN")
 
 CITIES = ["Mumbai", "Delhi", "Bengaluru", "Hyderabad", "Ahmedabad", "Chennai", "Kolkata", "Surat", "Pune", "Jaipur"]
+COUNTRIES = ["United Kingdom", "France", "Germany", "USA", "Australia", "UAE", "Japan"]
 
 def get_simulated_now():
     factor = float(os.environ.get("SIM_ACCELERATION_FACTOR", 1.0))
@@ -27,16 +28,25 @@ def generate_online_retail_row():
     if random.random() < 0.1: # 10% chance of cancellation
         invoice_no = f"C{invoice_no}"
         
+    # Faults
+    qty = random.randint(1, 50)
+    if random.random() < 0.03: # 3% chance of negative quantity
+        qty = -qty
+        
+    unit_price = round(random.uniform(0.5, 20.0), 2)
+    if random.random() < 0.02: # 2% chance of missing UnitPrice
+        unit_price = None
+
     sim_now = get_simulated_now()
     return {
         "InvoiceNo": invoice_no,
         "StockCode": f"{random.randint(10000, 99999)}{random.choice(['', 'A', 'B', 'C'])}",
         "Description": fake.catch_phrase(),
-        "Quantity": random.randint(1, 50),
+        "Quantity": qty,
         "InvoiceDate": sim_now.strftime("%Y-%m-%d %H:%M:%S"),
-        "UnitPrice": round(random.uniform(0.5, 20.0), 2),
+        "UnitPrice": unit_price,
         "CustomerID": random.randint(12344, 18287),
-        "Country": "United Kingdom",
+        "Country": random.choice(COUNTRIES),
         "City": random.choice(CITIES),
         "Cost_Price": round(random.uniform(0.1, 10.0), 2),
         "Initial_Stock_Level": random.randint(100, 1000),
