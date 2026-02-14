@@ -14,22 +14,29 @@ def init_duckdb():
     con.execute("INSTALL delta; LOAD delta;")
     return con
 
-def merge_to_gold(con, gold_path, df, unique_keys, partition_cols=None):
-    if df.empty:
+def merge_to_gold(con, gold_path, arrow_table, unique_keys, partition_cols=None):
+    if not arrow_table or len(arrow_table) == 0:
         return
 
     if not os.path.exists(gold_path):
         try:
-            write_deltalake(gold_path, df, mode="overwrite", partition_by=partition_cols)
+            write_deltalake(gold_path, arrow_table, mode="overwrite", partition_by=partition_cols)
         except Exception as e:
             print(f"Error creating Gold table {gold_path}: {e}")
     else:
         try:
             dt = DeltaTable(gold_path)
-            predicate = " AND ".join([f"s.{k} = t.{k}" for k in unique_keys])
+            
+            # Encapsulate logic for safety
+            unique_keys = unique_keys or []
+            partition_cols = partition_cols or []
+            
+            all_keys = unique_keys + [c for c in partition_cols if c not in unique_keys]
+            predicate = " AND ".join([f"s.{k} = t.{k}" for k in all_keys])
+            
             (
                 dt.merge(
-                    source=df,
+                    source=arrow_table,
                     predicate=predicate,
                     source_alias="s",
                     target_alias="t"
@@ -38,6 +45,17 @@ def merge_to_gold(con, gold_path, df, unique_keys, partition_cols=None):
                 .when_not_matched_insert_all()
                 .execute()
             )
+            
+            # --- Performance Optimization ---
+            # Compaction: Merge small files into larger ones
+            dt.optimize().execute_compaction()
+            
+            # Checkpoint: Create a checkpoint file to speed up log reading
+            dt.create_checkpoint()
+
+            # Vacuum: Remove old files (retention default is 7 days usually)
+            # dt.vacuum(retention_hours=168) 
+            
         except Exception as e:
             print(f"Error merging into Gold table {gold_path}: {e}")
 
@@ -72,7 +90,7 @@ def process_dim_product(silver_root, gold_root, scans, updates):
                     QUALIFY ROW_NUMBER() OVER(PARTITION BY product_id ORDER BY source_system DESC) = 1
                 )
             """)
-            df_prod = con.query("SELECT * FROM dim_product_tmp").to_df()
+            df_prod = con.query("SELECT * FROM dim_product_tmp").arrow().read_all()
             merge_to_gold(con, os.path.join(gold_root, 'dim_product'), df_prod, unique_keys=["product_id"])
     finally:
         con.close()
@@ -83,51 +101,229 @@ def process_dim_customer(silver_root, gold_root, scans, updates):
 
     con = init_duckdb()
     try:
-        print("Updating dim_customer (Delta - SCD Type 2)...")
-        sources = []
-        if updates['retail']: sources.append(f"SELECT customer_id, city, country, order_timestamp, 'Online' as source FROM {scans['retail']}")
-        if updates['pos']: sources.append(f"SELECT customer_id, city, country, order_timestamp, 'POS' as source FROM {scans['pos']}")
+        print("Updating dim_customer (Delta - SCD Type 2 Incremental)...")
+        gold_path = os.path.join(gold_root, 'dim_customer')
         
-        if sources:
-            union_query = " UNION ALL ".join(sources)
-            con.execute(f"""
-                CREATE OR REPLACE TABLE dim_customer_tmp AS
-                WITH raw_customers AS (
-                    {union_query}
-                ),
-                valid_customers AS (
-                    SELECT * FROM raw_customers 
-                    WHERE customer_id IS NOT NULL AND customer_id != 'Unknown'
-                ),
-                ordered_customers AS (
-                    SELECT 
-                        customer_id, city, country, order_timestamp, source,
-                        LAG(city) OVER (PARTITION BY customer_id ORDER BY order_timestamp) as prev_city,
-                        LAG(country) OVER (PARTITION BY customer_id ORDER BY order_timestamp) as prev_country
-                    FROM valid_customers
-                ),
-                version_starts AS (
-                    SELECT 
-                        customer_id, city, country, source, order_timestamp as valid_from
-                    FROM ordered_customers
-                    WHERE prev_city IS NULL OR city != prev_city OR country != prev_country
-                ),
-                versions AS (
-                    SELECT 
-                        CAST((hash(customer_id || valid_from::VARCHAR) & 9223372036854775807) AS BIGINT) as customer_key,
-                        customer_id, city, country, source,
-                        valid_from,
-                        LEAD(valid_from) OVER (PARTITION BY customer_id ORDER BY valid_from) as valid_to,
-                        (LEAD(valid_from) OVER (PARTITION BY customer_id ORDER BY valid_from) IS NULL) as is_current
-                    FROM version_starts
-                )
-                SELECT * FROM versions
-                UNION ALL
+        # 1. Get Watermark (Max valid_from in Gold)
+        watermark = "1900-01-01"
+        if os.path.exists(gold_path):
+            try:
+                # Optimized Watermark Retrieval using DeltaTable directly
+                # Avoids DuckDB delta_scan overhead of parsing all log files
+                dt = DeltaTable(gold_path)
+                
+                # We only need the max valid_from. 
+                # Reading the column via PyArrow is much faster than SQL scan for metadata 
+                # if files are compacted, and avoids full log re-parsing if we just opened it.
+                # Note: If the table is huge, we might want to rely on partition stats if partitioned by date.
+                # For Dim Customer, it's not partitioned by date, so we read the column.
+                # However, we can also use a SQL query on the DeltaTable object if needed, 
+                # but standard arrow reduction is usually fast enough for Dimensions.
+                
+                # Check if table is empty first
+                if dt.version() >= 0:
+                     # This pulls the column into memory but it's just one timestamp column
+                    max_val = dt.to_pyarrow_table(columns=["valid_from"]).column("valid_from").max().as_py()
+                    if max_val:
+                        watermark = str(max_val)
+            except Exception as e:
+                print(f"Warning: Could not get watermark from {gold_path}, doing full load. Error: {e}")
+
+        print(f"SCD2 Watermark: {watermark}")
+
+        # 2. Query New Data from Silver ( > Watermark )
+        sources = []
+        if updates['retail']: sources.append(f"SELECT customer_id, city, country, order_timestamp, 'Online' as source FROM {scans['retail']} WHERE order_timestamp > '{watermark}'")
+        if updates['pos']: sources.append(f"SELECT customer_id, city, country, order_timestamp, 'POS' as source FROM {scans['pos']} WHERE order_timestamp > '{watermark}'")
+        
+        if not sources:
+            print("No new data found via watermark.")
+            return
+
+        union_query = " UNION ALL ".join(sources)
+        
+        # 3. Prepare Staging Data (New Versions)
+        # We process the new stream to find internal changes first
+        con.execute(f"""
+            CREATE OR REPLACE TABLE dim_customer_stage AS
+            WITH raw_customers AS (
+                {union_query}
+            ),
+            valid_customers AS (
+                SELECT * FROM raw_customers 
+                WHERE customer_id IS NOT NULL AND customer_id != 'Unknown'
+            ),
+            ordered_customers AS (
                 SELECT 
-                    0 as customer_key, 'Unknown', 'Unknown', 'Unknown', 'SYSTEM', '1900-01-01'::TIMESTAMP, NULL::TIMESTAMP, true
+                    customer_id, city, country, order_timestamp, source,
+                    LAG(city) OVER (PARTITION BY customer_id ORDER BY order_timestamp) as prev_city,
+                    LAG(country) OVER (PARTITION BY customer_id ORDER BY order_timestamp) as prev_country
+                FROM valid_customers
+            ),
+            -- Identify changes WITHIN the new batch
+            batch_changes AS (
+                SELECT 
+                    customer_id, city, country, source, order_timestamp as valid_from
+                FROM ordered_customers
+                WHERE prev_city IS NULL OR city != prev_city OR country != prev_country
+            ),
+            -- Deduplicate: Keep only the earliest occurrence of a change in the batch per day/timestamp?
+            -- Actually, if a user changes city twice in a batch, we capture both.
+            batch_dedup AS (
+                SELECT * 
+                FROM batch_changes
+                QUALIFY ROW_NUMBER() OVER(PARTITION BY customer_id, valid_from ORDER BY valid_from) = 1
+            )
+            SELECT * FROM batch_dedup
+        """)
+        
+        if not os.path.exists(gold_path):
+            # First Run: Create table from Stage
+            print("First run: Creating dim_customer from Staging...")
+            con.execute(f"""
+                CREATE OR REPLACE TABLE dim_customer_final AS
+                SELECT 
+                    CAST((hash(customer_id || valid_from::VARCHAR) & 9223372036854775807) AS BIGINT) as customer_key,
+                    customer_id, city, country, source,
+                    valid_from,
+                    LEAD(valid_from) OVER (PARTITION BY customer_id ORDER BY valid_from) as valid_to,
+                    (LEAD(valid_from) OVER (PARTITION BY customer_id ORDER BY valid_from) IS NULL) as is_current
+                FROM dim_customer_stage
+                UNION ALL
+                SELECT 0, 'Unknown', 'Unknown', 'Unknown', 'SYSTEM', '1900-01-01'::TIMESTAMP, NULL::TIMESTAMP, true
             """)
-            df_cust = con.query("SELECT * FROM dim_customer_tmp").to_df()
-            write_deltalake(os.path.join(gold_root, 'dim_customer'), df_cust, mode="overwrite")
+            df_cust = con.query("SELECT * FROM dim_customer_final").arrow().read_all()
+            write_deltalake(gold_path, df_cust, mode="overwrite")
+            return
+
+        # 4. Incremental Merge Logic
+        # We need to compare batch_dedup (Staging) with Current Gold.
+        # If Staging is truly new (diff city than current gold), we insert.
+        # AND we update the old record.
+        
+        print("SCD2 Merge: Calculating updates and inserts...")
+        
+        # Pull current Gold records for affected customers
+        con.execute(f"""
+            CREATE OR REPLACE TABLE current_gold AS
+            SELECT customer_key, customer_id, city, country, valid_from, valid_to
+            FROM delta_scan('{gold_path}')
+            WHERE is_current = true
+            AND customer_id IN (SELECT DISTINCT customer_id FROM dim_customer_stage)
+        """)
+        
+        # Determine Logic
+        # New rows that are actually changes relative to Gold
+        # Or New customers entirely
+        con.execute("""
+            CREATE OR REPLACE TABLE scd_ops AS
+            SELECT 
+                s.customer_id, s.city, s.country, s.source, s.valid_from,
+                g.customer_key as old_customer_key,
+                g.valid_from as old_valid_from,
+                
+                CASE 
+                    WHEN g.customer_id IS NULL THEN 'INSERT_NEW' -- New Customer
+                    WHEN s.city != g.city OR s.country != g.country THEN 'UPDATE_INSERT' -- Changed
+                    -- Also cover case where we simply have newer data confirming same state? Ignore.
+                    ELSE 'IGNORE' 
+                END as op_type
+            FROM dim_customer_stage s
+            LEFT JOIN current_gold g ON s.customer_id = g.customer_id
+            -- Filter out earlier dates if any (watermark should prevent, but safe guard)
+            WHERE s.valid_from > COALESCE(g.valid_from, '1900-01-01')
+        """)
+        
+        # Prepare Merge Source
+        # 1. Updates: Rows to match and Update (Close old)
+        # 2. Inserts: Rows to Insert (New version)
+        
+        # We need to construct a standard Merge Source.
+        # Common keys for Merge: `customer_key` (if updating) OR NULL (if inserting).
+        
+        # Rows to Update (Close current):
+        # Need to match on `customer_key`.
+        # Set `is_current` = false, `valid_to` = new `valid_from`.
+        
+        # Rows to Insert (Open new):
+        # Key = NULL (force Not Matched).
+        # Set `is_current` = true, `valid_from` = new `valid_from`, ...
+        
+        con.execute(f"""
+            CREATE OR REPLACE TABLE merge_source AS
+            -- Operation 1: UPDATE existing current rows
+            SELECT 
+                old_customer_key as merge_key, -- Matches Gold
+                customer_id, city, country, source,
+                valid_from as new_valid_from, -- This becomes valid_to for old record
+                false as new_is_current,
+                'UPDATE' as merge_action
+            FROM scd_ops
+            WHERE op_type = 'UPDATE_INSERT'
+            
+            UNION ALL
+            
+            -- Operation 2: INSERT new rows (for both New Customers and New Versions of existing)
+            SELECT 
+                NULL as merge_key, -- Forces Insert
+                customer_id, city, country, source,
+                valid_from as new_valid_from, -- This is valid_from for new record
+                true as new_is_current,
+                'INSERT' as merge_action
+            FROM scd_ops
+            WHERE op_type IN ('INSERT_NEW', 'UPDATE_INSERT')
+        """)
+        
+        arrow_source = con.query("""
+            SELECT 
+                merge_key, 
+                customer_id, city, country, source, 
+                new_valid_from, new_is_current, merge_action, 
+                -- Generate new key for inserts
+                CAST((hash(customer_id || new_valid_from::VARCHAR) & 9223372036854775807) AS BIGINT) as generated_key
+            FROM merge_source
+        """).arrow().read_all()
+        
+        if len(arrow_source) > 0:
+            dt = DeltaTable(gold_path)
+            (
+                dt.merge(
+                    source=arrow_source,
+                    predicate="t.customer_key = s.merge_key",
+                    source_alias="s",
+                    target_alias="t"
+                )
+                .when_matched_update(
+                    predicate="s.merge_action = 'UPDATE'",
+                    updates={
+                        "is_current": "s.new_is_current",
+                        "valid_to": "s.new_valid_from"
+                    }
+                )
+                .when_not_matched_insert(
+                    predicate="s.merge_action = 'INSERT'",
+                    updates={
+                        "customer_key": "s.generated_key",
+                        "customer_id": "s.customer_id",
+                        "city": "s.city",
+                        "country": "s.country",
+                        "source": "s.source",
+                        "valid_from": "s.new_valid_from",
+                        "valid_to": "NULL",
+                        "is_current": "s.new_is_current"
+                    }
+                )
+                .execute()
+            )
+            
+            # Optimization for Dim Customer
+            dt.optimize().execute_compaction()
+            dt.create_checkpoint()
+            
+            print("SCD2 Merge complete.")
+        else:
+            print("No SCD2 changes to merge.")
+
     finally:
         con.close()
 
@@ -154,7 +350,7 @@ def process_dim_date(silver_root, gold_root, scans, updates):
                 (DAYOFWEEK(full_date) = 0) as is_weekend
             FROM date_spine;
         """)
-        df_date = con.query("SELECT * FROM dim_date_tmp").to_df()
+        df_date = con.query("SELECT * FROM dim_date_tmp").arrow().read_all()
         write_deltalake(os.path.join(gold_root, 'dim_date'), df_date, mode="overwrite")
     finally:
         con.close()
@@ -216,7 +412,7 @@ def process_fact_sales(silver_root, gold_root, scans, updates):
                 JOIN {dim_prod_scan} p ON s.product_id = p.product_id
             """)
             
-            df_sales = con.query("SELECT * FROM fact_sales_tmp").to_df()
+            df_sales = con.query("SELECT * FROM fact_sales_tmp").arrow().read_all()
             merge_to_gold(con, os.path.join(gold_root, 'fact_sales'), df_sales, ["sales_key"], ["year", "month", "day"])
     finally:
         con.close()
@@ -248,7 +444,7 @@ def process_fact_inventory(silver_root, gold_root, scans, updates):
             FROM {scan_warehouse} w
             JOIN {dim_prod_scan} p ON w.product_id = p.product_id
         """)
-        df_inv = con.query("SELECT * FROM fact_inventory_tmp").to_df()
+        df_inv = con.query("SELECT * FROM fact_inventory_tmp").arrow().read_all()
         merge_to_gold(con, os.path.join(gold_root, 'fact_inventory'), df_inv, ["log_id"], ["year", "month", "day"])
     finally:
         con.close()
@@ -289,7 +485,7 @@ def process_fact_shipments(silver_root, gold_root, scans, updates):
             LEFT JOIN {fact_sales_scan} s ON REGEXP_REPLACE(sh.invoice_id, '^C', '', 'i') = s.invoice_id
             GROUP BY ALL
         """)
-        df_ship = con.query("SELECT * FROM fact_shipments_tmp").to_df()
+        df_ship = con.query("SELECT * FROM fact_shipments_tmp").arrow().read_all()
         merge_to_gold(con, os.path.join(gold_root, 'fact_shipments'), df_ship, ["invoice_id"], ["year", "month", "day"])
     finally:
         con.close()
@@ -310,7 +506,7 @@ def process_kpi_summary(silver_root, gold_root, scans, updates):
                 COUNT(DISTINCT customer_key) as total_customers
             FROM delta_scan('{os.path.join(gold_root, 'fact_sales')}')
         """)
-        df_kpi = con.query("SELECT * FROM kpi_summary_tmp").to_df()
+        df_kpi = con.query("SELECT * FROM kpi_summary_tmp").arrow().read_all()
         write_deltalake(os.path.join(gold_root, 'kpi_summary'), df_kpi, mode="overwrite")
     finally:
         con.close()

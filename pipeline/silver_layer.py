@@ -11,26 +11,39 @@ def init_duckdb():
     con.execute("INSTALL delta; LOAD delta;")
     return con
 
-def merge_to_silver(con, silver_path, df, unique_keys, partition_cols, timestamp_col):
+def merge_to_silver(con, silver_path, arrow_table, unique_keys, partition_cols, timestamp_col):
     """
-    Merges data into Silver Delta table.
+    Merges data into Silver Delta table using Arrow.
     """
-    if df.empty:
+    if not arrow_table:
+        print("No data to merge.")
+        return
+    
+    # Check simple length or num_rows safely
+    try:
+        nrows = len(arrow_table)
+    except:
+        nrows = arrow_table.num_rows
+        
+    if nrows == 0:
         print("No data to merge.")
         return
 
     if not os.path.exists(silver_path):
         print(f"Creating new Silver table at {silver_path}")
-        write_deltalake(silver_path, df, mode="overwrite", partition_by=partition_cols)
+        write_deltalake(silver_path, arrow_table, mode="overwrite", partition_by=partition_cols)
     else:
         print(f"Merging into existing Silver table at {silver_path}")
         dt = DeltaTable(silver_path)
         
-        predicate = " AND ".join([f"s.{k} = t.{k}" for k in unique_keys])
+        # Optimize Merge: Include partition columns in predicate to enable pruning
+        # Ensure source has these columns
+        all_keys = unique_keys + [c for c in partition_cols if c not in unique_keys]
+        predicate = " AND ".join([f"s.{k} = t.{k}" for k in all_keys])
         
         (
             dt.merge(
-                source=df,
+                source=arrow_table,
                 predicate=predicate,
                 source_alias="s",
                 target_alias="t"
@@ -54,8 +67,12 @@ def process_table(con, task_id, bronze_path, silver_path, query_template, merge_
     query = query_template.replace("__SOURCE__", scan_query)
     
     try:
-        df = con.query(query).to_df()
-        merge_to_silver(con, silver_path, df, merge_keys, partition_cols, timestamp_col)
+        # Use Arrow for zero-copy transfer
+        # write_deltalake supports Arrow Table directly
+        # arrow() returns a RecordBatchReader, we need to consume it to get a Table
+        arrow_table = con.query(query).arrow().read_all()
+        
+        merge_to_silver(con, silver_path, arrow_table, merge_keys, partition_cols, timestamp_col)
         
         # Update checkpoint
         checkpoints = load_checkpoints()
@@ -64,6 +81,7 @@ def process_table(con, task_id, bronze_path, silver_path, query_template, merge_
         
     except Exception as e:
         print(f"Error processing {task_id}: {e}")
+        raise e
 
 def process_online_retail(con, bronze_path, silver_path):
     query = f"""
