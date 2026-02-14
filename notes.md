@@ -276,3 +276,33 @@ Just like Silver, Gold uses the **Delta Log** to ensure that an executive lookin
 *   **Atomic Merges**: The complex SCD Type 2 logic (multiple updates and inserts) happens within a single Delta transaction. It either all commits or none of it does.
 *   **Snapshot Consistency**: Even if a multi-minute "Optimize/Compaction" job is running, the Dashboard continues to read from the last stable snapshot without performance degradation or locks.
 *   **Metadata Checkpoints**: By using `.create_checkpoint()`, we ensure that the system can quickly determine the current state of the 599-line `gold_layer.py` output without replaying 1,000s of individual JSON files.
+
+## Phase 3: Consumption & Visualization
+
+The final stage of the Medallion architecture turns processed data into competitive advantage. This phase covers the **Analytics API** (the bridge) and the **Retail Dashboard** (the interface).
+
+### 1. The Analytics API (`api/main.py`)
+Built with **FastAPI**, this server acts as the high-performance interface between the Delta Lakehouse and the Frontend.
+
+*   **Persistent Connection & Views**:
+    *   The API initializes a single, shared **DuckDB connection** at startup.
+    *   It creates **DuckDB Views** on top of the Delta tables using `delta_scan`. This caches the table metadata, ensuring that every API request doesn't have to re-read the Delta log from scratch.
+*   **Thread-Safe Concurrency**:
+    *   Analytical queries can be CPU-intensive. The API uses a `threading.Lock()` to ensure that concurrent requests don't interfere with the internal state of the DuckDB connection, providing a stable experience for multiple dashboard users.
+*   **Result Caching**:
+    *   To ensure "Sub-Second" responsiveness, the API implements an **in-memory cache**. Frequently accessed KPIs (like Total Revenue) are served instantly without hitting the disk.
+*   **Admin Sync hooks**:
+    *   The API exposes a `/api/admin/refresh` endpoint. This is triggered by the **Master Orchestration Engine** (`main.py`) immediately after a Gold Layer run to clear the cache and refresh the metadata views, ensuring the dashboard is always displaying the freshest data.
+
+### 2. The Retail Dashboard (`ui/`)
+The Frontend is a modern, responsive **React** application built for clarity and impact.
+
+*   **Modular Architecture**:
+    *   The UI is divided into logical "Slices": **Commercial**, **Operations**, **Customer**, and **Lineage**. This reflects the Star Schema design of the Gold Layer.
+*   **High-Impact Visuals**:
+    *   **Chart.js Integration**: Uses hardware-accelerated canvas rendering to display complex revenue trends and distribution charts.
+    *   **Theming Engine**: Supports a "Glassmorphism" aesthetic with both Light and Dark modes, catering to both office and warehouse environment visibility.
+*   **Data Lineage Visualizer**:
+    *   A custom-built "Funnel" component that reveals the inner workings of the pipeline. It pulls live row counts from **Landing $\rightarrow$ Bronze $\rightarrow$ Silver $\rightarrow$ Gold**, giving users confidence that the data they see is accurate and fully processed.
+*   **Interactive Controls**:
+    *   The **"Sync Data"** button allows users to bridge the gap between "Live Simulation" and "Batch Processing," triggering a full Medallion pipeline run directly from the browser.
