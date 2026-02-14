@@ -25,6 +25,10 @@ def merge_to_gold(con, gold_path, arrow_table, unique_keys, partition_cols=None)
             print(f"Error creating Gold table {gold_path}: {e}")
     else:
         try:
+            # --- Schema Evolution Step ---
+            # Evolve schema first if new columns exist in the incoming batch
+            write_deltalake(gold_path, arrow_table.slice(0, 0), mode="append", schema_mode="merge")
+
             dt = DeltaTable(gold_path)
             
             # Encapsulate logic for safety
@@ -285,6 +289,10 @@ def process_dim_customer(silver_root, gold_root, scans, updates):
         """).arrow().read_all()
         
         if len(arrow_source) > 0:
+            # --- Schema Evolution Step ---
+            # Pre-evolve schema to support new columns in arrow_source
+            write_deltalake(gold_path, arrow_source.slice(0, 0), mode="append", schema_mode="merge")
+            
             dt = DeltaTable(gold_path)
             (
                 dt.merge(

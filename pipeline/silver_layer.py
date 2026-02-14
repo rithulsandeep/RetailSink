@@ -34,6 +34,12 @@ def merge_to_silver(con, silver_path, arrow_table, unique_keys, partition_cols, 
         write_deltalake(silver_path, arrow_table, mode="overwrite", partition_by=partition_cols)
     else:
         print(f"Merging into existing Silver table at {silver_path}")
+        
+        # --- Schema Evolution Step ---
+        # We perform an empty 'append' with schema_mode='merge' to evolve the schema 
+        # if the incoming Arrow table has new columns.
+        write_deltalake(silver_path, arrow_table.slice(0, 0), mode="append", schema_mode="merge")
+        
         dt = DeltaTable(silver_path)
         
         # Optimize Merge: Include partition columns in predicate to enable pruning

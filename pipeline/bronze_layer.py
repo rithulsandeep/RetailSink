@@ -172,7 +172,8 @@ def process_file(file_path, output_root, timestamp_col, custom_headers=None):
             output_dir,
             df,
             mode=mode,
-            partition_by=["year", "month", "day"]
+            partition_by=["year", "month", "day"],
+            schema_mode="merge"
         )
         print(f"Successfully appended {new_rows} rows to Delta Lake table.")
         
