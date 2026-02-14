@@ -2,3 +2,4 @@ medallion/*
 landing/*
 */node_modules/*
 __pycache__/*
+data/*
