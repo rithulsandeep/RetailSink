@@ -92,7 +92,7 @@ Medallion architecture is a data design pattern used to logically organize data 
     *   Production-ready data optimized for high-performance consumption.
     *   Tables are structured (often using a Star Schema) to answer specific business KPIs like Daily Revenue or Inventory Turnover.
 
-### Why Medallion Architecture?
+#### Why Medallion Architecture?
 
 Compared to traditional "Source-to-BI" ETL or simple "Flat-File" storage, Medallion offers:
 
@@ -107,3 +107,47 @@ Compared to traditional "Source-to-BI" ETL or simple "Flat-File" storage, Medall
 *   **Logical Traceability**:
     *   *How?* By creating **Permanent Checkpoints**. Because every state change is materialized in a new layer, you can literally "see" the transformation happen step-by-step. If a number looks wrong in Gold, you can check Silver to see if it was a cleaning error, or Bronze to see if it was a source data issue.
 
+## Bronze Layer Implementation (`pipeline/bronze_layer.py`)
+
+The Bronze Layer script is responsible for the **Ingestion (Raw)** phase, moving data from the `landing/` zone into the `medallion/bronze/` layer incrementally.
+
+### 1. State Management (Checkpoints)
+The script uses a checkpointing mechanism to ensure it only processes **new** data from files that are constantly growing.
+*   **Checkpoint Storage**: Reads/writes to `data/pipeline_checkpoints.json`.
+*   **Logic**: It stores the number of rows already processed for each source file. Next time it runs, it starts reading from where it left off, preventing duplicate data in the Lakehouse.
+
+### 2. The Core Processing Logic (`process_file`)
+This function handles the heavy lifting for each individual data source.
+
+*   **Incremental CSV Reading**: Uses `pd.read_csv(..., skiprows=N)` where `N` is the last row count. It manually applies `custom_headers` since `skiprows` removes the file's original header.
+*   **Data Validation (Minimal)**: 
+    *   Converts the target timestamp column (e.g., `InvoiceDate`) to `datetime`.
+    *   Drops rows with invalid/null timestamps to ensure partitioning works correctly.
+*   **Derived Partitioning**: Creates `year`, `month`, and `day` columns from the timestamp for optimized storage and retrieval.
+*   **Delta Lake Ingestion**:
+    *   **Modes**: Uses `overwrite` for first-time runs and `append` for all subsequent runs.
+    *   **Physical Layout**: Writes data in Delta Parquet format, partitioned by `/year/month/day/`.
+    *   **Schema Evolution**: Uses `schema_mode="merge"` to allow the pipeline to adapt to new source columns automatically.
+
+### 3. Schema Evolution & Integrity Strategy
+
+The pipeline implements a **Code-First Schema Evolution** strategy. This is a deliberate design choice to balance system flexibility with data governance.
+
+#### A. The "Code-First" Gatekeeper
+While Delta Lake supports fully automatic schema discovery, we have **explicitly hardcoded headers** in the `__main__` block. 
+*   **Security & Integrity**: This acts as a filter. If a source system accidentally includes sensitive data (e.g., PII) or garbage columns, the pipeline will ignore them because they aren't in the "allow-list" headers.
+*   **The "Approval" Process**: To evolve the schema, a developer must manually update the header list in `bronze_layer.py`. This manual update serves as the official "approval" for the pipeline to start recognizing and ingesting the new field.
+
+#### B. Storage-Level Evolution (The "Merge" Magic)
+Once a new column is added to the hardcoded list, the storage layer handles the transition without any table downtime or manual SQL migrations:
+*   **Automatic Merging**: When `write_deltalake` is called with `schema_mode="merge"`, Delta Lake detects the new column and updates the table's transaction log (metadata) to include it.
+*   **Historical Consistency**: Existing data rows remain untouched, but are retroactively treated as having `NULL` values for the newly added column. This allows you to query the entire history (old and new) using a single schema immediately.
+
+### 3. Data Ingestion Mapping
+
+| Source System | Landing Path | Timestamp Column | Layer Path |
+| :--- | :--- | :--- | :--- |
+| **E-commerce (Web)** | `landing/Online_retail_data.csv` | `InvoiceDate` | `medallion/bronze/Online_retail_data` |
+| **POS Billing (Store)** | `landing/pos_billing_data.csv` | `BillDate` | `medallion/bronze/pos_billing_data` |
+| **Warehouse (Inventory)**| `landing/warehouse_inventory_data.csv` | `EventDate` | `medallion/bronze/warehouse_inventory_data` |
+| **Shipments (Logistics)**| `landing/shipments_data.csv` | `ship_timestamp` | `medallion/bronze/shipments_data` |
